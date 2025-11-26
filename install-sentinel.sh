@@ -82,8 +82,9 @@ print_header
 DISTRO=$(detect_distro)
 echo -e "Detected: ${CYAN}${DISTRO}${NC}"
 
-# Detect script directory
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+# Detect script directory (if run locally)
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" 2>/dev/null )" 2>/dev/null && pwd )"
+GITHUB_RAW="https://raw.githubusercontent.com/VidGuiCode/sentinal/main"
 
 # Install dependencies
 install_deps "$DISTRO"
@@ -96,8 +97,13 @@ fi
 echo -e "${GREEN}  ✓ Sensor detection complete${NC}"
 
 echo -e "${YELLOW}[3/4] Installing Sentinel...${NC}"
-# Copy to system bin
-cp "$SCRIPT_DIR/sentinel-monitor.py" /usr/local/bin/sentinel
+# Try local file first, then download from GitHub
+if [ -f "$SCRIPT_DIR/sentinel-monitor.py" ]; then
+    cp "$SCRIPT_DIR/sentinel-monitor.py" /usr/local/bin/sentinel
+else
+    echo "  Downloading from GitHub..."
+    curl -sL "$GITHUB_RAW/sentinel-monitor.py" -o /usr/local/bin/sentinel
+fi
 chmod 755 /usr/local/bin/sentinel
 
 # Create short alias

@@ -46,20 +46,31 @@ A lightweight terminal UI (TUI) system monitor for Linux with real-time graphs, 
 
 ## Installation
 
-### Quick Install
+### One-Line Install
 
 ```bash
-git clone https://github.com/VidGuiCode/sentinel.git
-cd sentinel
+curl -sL https://raw.githubusercontent.com/VidGuiCode/sentinal/main/install-sentinel.sh | sudo bash
+```
+
+Or with wget:
+```bash
+wget -qO- https://raw.githubusercontent.com/VidGuiCode/sentinal/main/install-sentinel.sh | sudo bash
+```
+
+### From Source
+
+```bash
+git clone https://github.com/VidGuiCode/sentinal.git
+cd sentinal
 sudo bash install-sentinel.sh
 ```
 
-### Manual Install
+### Manual (No Installer)
 
 ```bash
 sudo apt-get install python3 lm-sensors curl
-chmod +x sentinel-monitor.py
-sudo cp sentinel-monitor.py /usr/local/bin/sentinel
+curl -sL https://raw.githubusercontent.com/VidGuiCode/sentinal/main/sentinel-monitor.py | sudo tee /usr/local/bin/sentinel > /dev/null
+sudo chmod +x /usr/local/bin/sentinel
 ```
 
 ## Usage
