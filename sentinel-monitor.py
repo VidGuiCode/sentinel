@@ -28,7 +28,7 @@ from datetime import datetime, timedelta
 from collections import deque
 from pathlib import Path
 
-VERSION = "0.3.0"
+VERSION = "0.3.2"
 
 # Default configuration
 DEFAULT_CONFIG = {
@@ -179,6 +179,11 @@ class SentinelMonitor:
         # Cache CPU model (doesn't change)
         self.cpu_model = self._get_cpu_model()
         self.cpu_cores = os.cpu_count() or 1
+        
+        # Startup optimization: cache tool availability checks
+        self._docker_available = None
+        self._kubectl_available = None
+        self._first_render = True  # Skip expensive ops on first frame
 
     def _detect_default_interface(self):
         """Detect default network interface from routing table."""
@@ -223,10 +228,10 @@ class SentinelMonitor:
             pass
         return "Unknown CPU"
 
-    def run_cmd(self, cmd):
+    def run_cmd(self, cmd, timeout=1):
         """Run shell command and return output"""
         try:
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=2)
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
             return result.stdout.strip()
         except:
             return ""
@@ -770,27 +775,38 @@ class SentinelMonitor:
         except:
             total = 0
         
-        # Still use ps for top processes (complex to replicate efficiently)
-        top_cpu = self.run_cmd("ps aux --sort=-%cpu | head -2 | tail -1 | awk '{print $11\" \"$3\"%\"}'")
-        top_mem = self.run_cmd("ps aux --sort=-%mem | head -2 | tail -1 | awk '{print $11\" \"$4\"%\"}'")
+        # Cache top processes - only update every 5 seconds (expensive ps calls)
+        current_time = time.time()
+        if not hasattr(self, '_last_proc_check') or current_time - self._last_proc_check > 5:
+            self._last_proc_check = current_time
+            # Still use ps for top processes (complex to replicate efficiently)
+            top_cpu = self.run_cmd("ps aux --sort=-%cpu | head -2 | tail -1 | awk '{print $11\" \"$3\"%\"}'") 
+            top_mem = self.run_cmd("ps aux --sort=-%mem | head -2 | tail -1 | awk '{print $11\" \"$4\"%\"}'")
 
-        # Shorten names
-        def shorten(s, max_len=25):
-            if not s or len(s) <= max_len:
-                return s
-            parts = s.rsplit(' ', 1)
-            if len(parts) == 2:
-                return parts[0][:max_len-4] + "… " + parts[1]
-            return s[:max_len]
+            # Shorten names
+            def shorten(s, max_len=25):
+                if not s or len(s) <= max_len:
+                    return s
+                parts = s.rsplit(' ', 1)
+                if len(parts) == 2:
+                    return parts[0][:max_len-4] + "… " + parts[1]
+                return s[:max_len]
+            
+            self._cached_top_cpu = shorten(top_cpu)
+            self._cached_top_mem = shorten(top_mem)
         
         return {
             'total': total,
-            'top_cpu': shorten(top_cpu),
-            'top_mem': shorten(top_mem)
+            'top_cpu': getattr(self, '_cached_top_cpu', ''),
+            'top_mem': getattr(self, '_cached_top_mem', '')
         }
 
-    def get_docker_info(self):
-        """Get Docker container information."""
+    def get_docker_info(self, skip_stats=False):
+        """Get Docker container information.
+        
+        Args:
+            skip_stats: If True, skip per-container stats (faster startup)
+        """
         result = {
             'available': False,
             'running': 0,
@@ -799,23 +815,28 @@ class SentinelMonitor:
             'containers': []
         }
         
-        # Check if Docker is installed and accessible
-        docker_check = self.run_cmd("which docker 2>/dev/null")
-        if not docker_check:
+        # Cache docker availability check
+        if self._docker_available is None:
+            docker_check = self.run_cmd("which docker 2>/dev/null")
+            self._docker_available = bool(docker_check) and os.path.exists('/var/run/docker.sock')
+        
+        if not self._docker_available:
             return result
         
-        # Check if Docker daemon is running
-        if not os.path.exists('/var/run/docker.sock'):
-            return result
+        # Cache docker stats - only fetch every 10 seconds (very expensive)
+        current_time = time.time()
+        use_cached_stats = hasattr(self, '_docker_stats_cache') and (current_time - getattr(self, '_docker_stats_time', 0) < 10)
         
         try:
-            # Get container list with stats
+            # Get container list
             output = self.run_cmd("docker ps -a --format '{{.ID}}|{{.Names}}|{{.Status}}|{{.Image}}' 2>/dev/null")
             if not output or "permission denied" in output.lower() or "Cannot connect" in output:
+                self._docker_available = False
                 return result
             
             result['available'] = True
             containers = []
+            running_ids = []
             
             for line in output.strip().split('\n'):
                 if not line:
@@ -825,23 +846,18 @@ class SentinelMonitor:
                     container_id, name, status, image = parts[:4]
                     is_running = status.lower().startswith('up')
                     
-                    # Get CPU/MEM for running containers (cached)
                     cpu_pct = mem_pct = 0.0
                     if is_running:
-                        stats = self.run_cmd(f"docker stats {container_id} --no-stream --format '{{{{.CPUPerc}}}}|{{{{.MemPerc}}}}' 2>/dev/null")
-                        if stats and '|' in stats:
-                            try:
-                                cpu_str, mem_str = stats.split('|')
-                                cpu_pct = float(cpu_str.replace('%', ''))
-                                mem_pct = float(mem_str.replace('%', ''))
-                            except:
-                                pass
+                        running_ids.append(container_id[:12])
+                        # Use cached stats if available
+                        if use_cached_stats and container_id[:12] in self._docker_stats_cache:
+                            cpu_pct, mem_pct = self._docker_stats_cache[container_id[:12]]
                     
                     containers.append({
                         'id': container_id[:12],
                         'name': name[:20],
                         'status': 'running' if is_running else 'stopped',
-                        'image': image.split('/')[-1][:15],  # Short image name
+                        'image': image.split('/')[-1][:15],
                         'cpu': cpu_pct,
                         'mem': mem_pct
                     })
@@ -850,6 +866,30 @@ class SentinelMonitor:
                         result['running'] += 1
                     else:
                         result['stopped'] += 1
+            
+            # Fetch stats for all running containers in ONE call (much faster)
+            if running_ids and not skip_stats and not use_cached_stats:
+                stats_output = self.run_cmd("docker stats --no-stream --format '{{.ID}}|{{.CPUPerc}}|{{.MemPerc}}' 2>/dev/null", timeout=3)
+                if stats_output:
+                    self._docker_stats_cache = {}
+                    self._docker_stats_time = current_time
+                    for line in stats_output.strip().split('\n'):
+                        if '|' in line:
+                            parts = line.split('|')
+                            if len(parts) >= 3:
+                                cid = parts[0][:12]
+                                try:
+                                    cpu = float(parts[1].replace('%', ''))
+                                    mem = float(parts[2].replace('%', ''))
+                                    self._docker_stats_cache[cid] = (cpu, mem)
+                                    # Update container in list
+                                    for c in containers:
+                                        if c['id'] == cid:
+                                            c['cpu'] = cpu
+                                            c['mem'] = mem
+                                            break
+                                except:
+                                    pass
             
             result['total'] = len(containers)
             result['containers'] = sorted(containers, key=lambda x: (x['status'] != 'running', -x['cpu']))[:10]
@@ -872,9 +912,12 @@ class SentinelMonitor:
             'context': ''
         }
         
-        # Check if kubectl is available
-        kubectl_check = self.run_cmd("which kubectl 2>/dev/null")
-        if not kubectl_check:
+        # Cache kubectl availability check
+        if self._kubectl_available is None:
+            kubectl_check = self.run_cmd("which kubectl 2>/dev/null")
+            self._kubectl_available = bool(kubectl_check)
+        
+        if not self._kubectl_available:
             return result
         
         try:
@@ -1209,7 +1252,15 @@ class SentinelMonitor:
         if current_time - self.last_update < 2:
             return self.cache
 
-        if not hasattr(self, '_last_ip_check') or current_time - self._last_ip_check > 30:
+        # On first render, skip slow operations for instant UI
+        is_first = self._first_render
+        if is_first:
+            self._first_render = False
+            # Set public IP to checking state, will be fetched later
+            self._public_ip_cache = "Checking..."
+        
+        # Defer public IP check (slow network call)
+        if not is_first and (not hasattr(self, '_last_ip_check') or current_time - self._last_ip_check > 30):
             self.get_public_ip()
             self._last_ip_check = current_time
 
@@ -1217,13 +1268,13 @@ class SentinelMonitor:
             'cpu': self.get_cpu_info(),
             'mem': self.get_memory_info(),
             'battery': self.get_battery_info(),
-            'disk': self.get_disk_usage(),
+            'disk': self.get_disk_usage() if not is_first else [],  # Skip docker volume check on first
             'network': self.get_network_info(),
-            'processes': self.get_processes(),
+            'processes': self.get_processes() if not is_first else {'total': 0, 'top_cpu': '', 'top_mem': ''},
             'uptime': self.get_uptime(),
             'energy': self.get_energy_info(),
-            'docker': self.get_docker_info(),
-            'kubernetes': self.get_kubernetes_info(),
+            'docker': self.get_docker_info(skip_stats=is_first),  # Skip per-container stats on first
+            'kubernetes': self.get_kubernetes_info() if not is_first else {'available': False, 'nodes': 0, 'nodes_ready': 0, 'pods_running': 0, 'pods_pending': 0, 'pods_failed': 0, 'pods': [], 'context': ''},
         }
 
         self.last_update = current_time
@@ -1771,6 +1822,7 @@ class SentinelMonitor:
                     break
                 elif key == ord('r') or key == ord('R'):
                     self.last_update = 0
+                    self._first_render = False  # Don't skip data on manual refresh
                 elif key == ord('i') or key == ord('I'):
                     self._last_ip_check = 0
                 elif key == ord('t') or key == ord('T'):
