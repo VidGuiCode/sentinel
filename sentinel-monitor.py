@@ -526,48 +526,19 @@ class SentinelMonitor:
             return volumes
         
         try:
-            # Get volume list with size
-            output = self.run_cmd("docker system df -v --format '{{.Type}}|{{.Name}}|{{.Size}}|{{.Reclaimable}}' 2>/dev/null | grep 'Volume'")
+            # Simple volume count
+            output = self.run_cmd("docker volume ls -q 2>/dev/null")
             if not output or "permission denied" in output.lower():
                 return volumes
             
-            total_size = 0
-            vol_count = 0
-            
-            for line in output.strip().split('\n'):
-                if not line or not line.startswith('Volume'):
-                    continue
-                parts = line.split('|')
-                if len(parts) >= 3:
-                    vol_count += 1
-                    size_str = parts[2].strip()
-                    # Parse size (e.g., "1.5GB", "500MB")
-                    try:
-                        if 'GB' in size_str:
-                            total_size += float(size_str.replace('GB', '')) * 1024 * 1024 * 1024
-                        elif 'MB' in size_str:
-                            total_size += float(size_str.replace('MB', '')) * 1024 * 1024
-                        elif 'KB' in size_str or 'kB' in size_str:
-                            total_size += float(size_str.replace('KB', '').replace('kB', '')) * 1024
-                        elif 'B' in size_str:
-                            total_size += float(size_str.replace('B', ''))
-                    except:
-                        pass
+            vol_count = len(output.strip().split('\n')) if output.strip() else 0
             
             if vol_count > 0:
-                # Format total size
-                def format_size(b):
-                    for unit in ['B', 'K', 'M', 'G', 'T']:
-                        if b < 1024:
-                            return f"{b:.0f}{unit}" if unit == 'B' else f"{b:.1f}{unit}"
-                        b /= 1024
-                    return f"{b:.1f}P"
-                
                 volumes.append({
                     'mount': f'docker:{vol_count}',
-                    'used': format_size(total_size),
+                    'used': f'{vol_count} volumes',
                     'total': '',
-                    'percent': 0,  # No percentage for volumes
+                    'percent': 0,
                     'type': 'docker'
                 })
         except:
@@ -828,14 +799,19 @@ class SentinelMonitor:
             'containers': []
         }
         
-        # Check if Docker socket exists
+        # Check if Docker is installed and accessible
+        docker_check = self.run_cmd("which docker 2>/dev/null")
+        if not docker_check:
+            return result
+        
+        # Check if Docker daemon is running
         if not os.path.exists('/var/run/docker.sock'):
             return result
         
         try:
             # Get container list with stats
             output = self.run_cmd("docker ps -a --format '{{.ID}}|{{.Names}}|{{.Status}}|{{.Image}}' 2>/dev/null")
-            if not output or "permission denied" in output.lower():
+            if not output or "permission denied" in output.lower() or "Cannot connect" in output:
                 return result
             
             result['available'] = True

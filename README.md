@@ -7,6 +7,13 @@ A lightweight terminal UI (TUI) system monitor for Linux with real-time graphs, 
 ![Platform](https://img.shields.io/badge/platform-linux-lightgrey.svg)
 ![Version](https://img.shields.io/badge/version-0.3.0-cyan.svg)
 
+## Quick start
+
+```bash
+curl -sL https://raw.githubusercontent.com/VidGuiCode/sentinal/main/install-sentinel.sh | sudo bash
+sentinel
+```
+
 ## Features
 
 ### System Monitoring
@@ -154,6 +161,15 @@ journalctl -u sentinel -f
 
 ### v0.1.0
 - Initial release
+
+## Open Source
+
+Sentinel is MIT-licensed and built for homelab and Linux users. You can:
+
+- Use it freely on any Linux machine
+- Open issues or feature requests on GitHub
+- Send pull requests (new panels, themes, bug fixes)
+- Fork it and adapt it for your own infrastructure
 
 ## License
 
