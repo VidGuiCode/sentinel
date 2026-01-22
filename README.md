@@ -10,7 +10,7 @@ A lightweight terminal UI (TUI) system monitor for Linux with real-time graphs, 
 ## Quick start
 
 ```bash
-curl -sL https://raw.githubusercontent.com/VidGuiCode/sentinal/main/install-sentinel.sh | sudo bash
+curl -sL https://raw.githubusercontent.com/VidGuiCode/sentinel/main/install-sentinel.sh | sudo bash
 sentinel
 ```
 
@@ -86,19 +86,19 @@ Use `--theme <name>` or press `t` in the TUI to switch.
 ### One-Line Install
 
 ```bash
-curl -sL https://raw.githubusercontent.com/VidGuiCode/sentinal/main/install-sentinel.sh | sudo bash
+curl -sL https://raw.githubusercontent.com/VidGuiCode/sentinel/main/install-sentinel.sh | sudo bash
 ```
 
 Or with wget:
 ```bash
-wget -qO- https://raw.githubusercontent.com/VidGuiCode/sentinal/main/install-sentinel.sh | sudo bash
+wget -qO- https://raw.githubusercontent.com/VidGuiCode/sentinel/main/install-sentinel.sh | sudo bash
 ```
 
 ### From Source
 
 ```bash
-git clone https://github.com/VidGuiCode/sentinal.git
-cd sentinal
+git clone https://github.com/VidGuiCode/sentinel.git
+cd sentinel
 sudo bash install-sentinel.sh
 ```
 
@@ -106,7 +106,7 @@ sudo bash install-sentinel.sh
 
 ```bash
 sudo apt-get install python3 lm-sensors curl
-curl -sL https://raw.githubusercontent.com/VidGuiCode/sentinal/main/sentinel-monitor.py | sudo tee /usr/local/bin/sentinel > /dev/null
+curl -sL https://raw.githubusercontent.com/VidGuiCode/sentinel/main/sentinel-monitor.py | sudo tee /usr/local/bin/sentinel > /dev/null
 sudo chmod +x /usr/local/bin/sentinel
 ```
 
