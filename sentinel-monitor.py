@@ -1232,29 +1232,14 @@ class SentinelMonitor:
         self._last_security_check = current_time
 
         # Pre-compile regex patterns for performance (cached in self._compiled_regex)
+        # These patterns match the EXACT same format as the working log analyzer
         if not self._compiled_regex:
             self._compiled_regex = {
-                'failed_pwd': re.compile(
-                    r'^(\w+\s+\d+\s+\d+:\d+:\d+)\s+(\S+)\s+(\w+)\[(\d+)\]:\s+Failed password for (?:invalid user )?(\S+) from (\S+)'
-                ),
-                'invalid_user': re.compile(
-                    r'^(\w+\s+\d+\s+\d+:\d+:\d+)\s+(\S+)\s+(\w+)\[(\d+)\]:\s+Invalid user (\S+) from (\S+)'
-                ),
-                'connection_closed': re.compile(
-                    r'^(\w+\s+\d+\s+\d+:\d+:\d+)\s+(\S+)\s+(\w+)\[(\d+)\]:\s+Connection closed by invalid user (\S+) (\S+)'
-                ),
-                'disconnected': re.compile(
-                    r'^(\w+\s+\d+\s+\d+:\d+:\d+)\s+(\S+)\s+(\w+)\[(\d+)\]:\s+Disconnected from (?:invalid user )?(\S+)? ?(\S+) port'
-                ),
-                'success_pwd': re.compile(
-                    r'^(\w+\s+\d+\s+\d+:\d+:\d+)\s+(\S+)\s+(\w+)\[(\d+)\]:\s+Accepted (?:password|publickey) for (\S+) from (\S+)'
-                ),
-                'perm_denied': re.compile(
-                    r'(permission denied|authentication failure|invalid user|illegal user)', re.IGNORECASE
-                ),
-                'sudo_cmd': re.compile(
-                    r'^(\w+\s+\d+\s+\d+:\d+:\d+)\s+(\S+)\s+sudo:\s+(\S+)\s+:.*COMMAND=(.+)'
-                ),
+                # Event patterns - search WITHIN message, not match from start (like working analyzer)
+                'invalid_user': re.compile(r'Invalid user (\S+) from ([\d.]+)'),
+                'failed_password': re.compile(r'Failed password for (?:invalid user )?(\S+) from ([\d.]+)'),
+                'connection_closed': re.compile(r'Connection closed by invalid user'),
+                'accepted_key': re.compile(r'Accepted (?:password|publickey) for (\S+) from ([\d.]+)'),
             }
 
         stats = {
@@ -1296,97 +1281,61 @@ class SentinelMonitor:
                 stats['available'] = True
 
                 for line in lines:
-                    # Use pre-compiled regex patterns for better performance on low-end servers
-                    failed_pwd = self._compiled_regex['failed_pwd'].match(line)
-                    invalid_user = self._compiled_regex['invalid_user'].match(line)
-                    connection_closed = self._compiled_regex['connection_closed'].match(line)
-                    disconnected = self._compiled_regex['disconnected'].match(line)
-                    success_pwd = self._compiled_regex['success_pwd'].match(line)
-                    perm_denied = self._compiled_regex['perm_denied'].search(line)
-                    sudo_cmd = self._compiled_regex['sudo_cmd'].match(line)
+                    if not line.strip():
+                        continue
 
-                    if failed_pwd:
-                        # Extract: timestamp, hostname, program, PID, username, IP
-                        timestamp_str, hostname, program, pid, username, ip = failed_pwd.groups()
+                    # Parse each line using search (not match) to find patterns WITHIN the line
+                    # This matches the working log analyzer's approach
+                    stats['total_parsed'] += 1  # Count all lines as parsed
+
+                    # Check for invalid user attempts
+                    invalid_match = self._compiled_regex['invalid_user'].search(line)
+                    if invalid_match:
+                        username, ip = invalid_match.groups()
                         stats['failed_logins'] += 1
-                        stats['total_parsed'] += 1
-
-                        # Track IP failures
                         stats['top_ips'][ip] = stats['top_ips'].get(ip, 0) + 1
+                        stats['top_users'][username] = stats['top_users'].get(username, 0) + 1
+                        stats['error_types']['Invalid user attempt'] = stats['error_types'].get('Invalid user attempt', 0) + 1
+
                         if ip not in self._ip_failure_tracker:
                             self._ip_failure_tracker[ip] = []
                         self._ip_failure_tracker[ip].append(current_time)
 
-                        # Track user failures
-                        stats['top_users'][username] = stats['top_users'].get(username, 0) + 1
-
-                        # Store event
                         event = {
                             'timestamp': current_time,
                             'type': 'failed_login',
                             'user': username,
                             'ip': ip,
-                            'program': program,
-                            'pid': pid
                         }
                         self._security_events.append(event)
-                        stats['recent_events'].append(f"Failed login: {username}@{ip}")
+                        continue
 
-                    elif invalid_user:
-                        # Handle "Invalid user" entries
-                        timestamp_str, hostname, program, pid, username, ip = invalid_user.groups()
+                    # Check for failed password attempts
+                    failed_match = self._compiled_regex['failed_password'].search(line)
+                    if failed_match:
+                        username, ip = failed_match.groups()
                         stats['failed_logins'] += 1
-                        stats['total_parsed'] += 1
                         stats['top_ips'][ip] = stats['top_ips'].get(ip, 0) + 1
+                        stats['top_users'][username] = stats['top_users'].get(username, 0) + 1
+                        stats['error_types']['Failed password'] = stats['error_types'].get('Failed password', 0) + 1
+
                         if ip not in self._ip_failure_tracker:
                             self._ip_failure_tracker[ip] = []
                         self._ip_failure_tracker[ip].append(current_time)
-                        stats['top_users'][username] = stats['top_users'].get(username, 0) + 1
-                        stats['error_types']['Invalid user attempt'] = stats['error_types'].get('Invalid user attempt', 0) + 1
+                        continue
 
-                    elif connection_closed:
-                        # Handle "Connection closed by invalid user" entries
-                        timestamp_str, hostname, program, pid, username, ip = connection_closed.groups()
-                        stats['failed_logins'] += 1
-                        stats['total_parsed'] += 1
-                        stats['top_ips'][ip] = stats['top_ips'].get(ip, 0) + 1
-                        if ip not in self._ip_failure_tracker:
-                            self._ip_failure_tracker[ip] = []
-                        self._ip_failure_tracker[ip].append(current_time)
-                        stats['top_users'][username] = stats['top_users'].get(username, 0) + 1
+                    # Check for connection closed events
+                    if self._compiled_regex['connection_closed'].search(line):
                         stats['error_types']['Connection closed (invalid user)'] = stats['error_types'].get('Connection closed (invalid user)', 0) + 1
+                        continue
 
-                    elif disconnected:
-                        # Handle "Disconnected from invalid user" entries
-                        match_groups = disconnected.groups()
-                        if len(match_groups) >= 6:
-                            timestamp_str, hostname, program, pid, username, ip = match_groups
-                            if username and ip:
-                                stats['failed_logins'] += 1
-                                stats['total_parsed'] += 1
-                                stats['top_ips'][ip] = stats['top_ips'].get(ip, 0) + 1
-                                if ip not in self._ip_failure_tracker:
-                                    self._ip_failure_tracker[ip] = []
-                                self._ip_failure_tracker[ip].append(current_time)
-
-                    elif success_pwd:
-                        timestamp_str, hostname, program, pid, username, ip = success_pwd.groups()
+                    # Check for successful logins
+                    success_match = self._compiled_regex['accepted_key'].search(line)
+                    if success_match:
+                        username, ip = success_match.groups()
                         stats['successful_logins'] += 1
-                        stats['total_parsed'] += 1
                         stats['top_ips'][ip] = stats['top_ips'].get(ip, 0) + 1
-
-                    elif perm_denied:
-                        stats['total_parsed'] += 1
-                        error_msg = perm_denied.group(1)
-                        stats['error_types'][error_msg] = stats['error_types'].get(error_msg, 0) + 1
-
-                    elif sudo_cmd:
-                        timestamp_str, hostname, username, command = sudo_cmd.groups()
-                        stats['total_parsed'] += 1
-                        # Could track suspicious sudo commands here
-
-                    else:
-                        stats['total_unparsed'] += 1
+                        continue
 
                 # Calculate failed vs successful ratio
                 total_logins = stats['failed_logins'] + stats['successful_logins']
