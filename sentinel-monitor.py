@@ -66,6 +66,7 @@ DEFAULT_CONFIG = {
     'show_per_core': True,
     'show_vpn': True,
     'public_ip_check': True,
+    'light_mode': False,
     'log_file': '/var/log/sentinel.log',
     'proxy_logs': {
         'nginx': '/var/log/nginx/access.log',
@@ -323,18 +324,18 @@ class SentinelMonitor:
         else:
             perms['docker'] = 'not_installed'
         
-        # Kubernetes - check kubectl availability
-        kubectl_path = self.run_cmd("which kubectl 2>/dev/null")
+        # Kubernetes - check kubectl availability (fast, short timeout)
+        kubectl_path = self.run_cmd("which kubectl 2>/dev/null", timeout=0.5)
         if kubectl_path:
             perms['kubernetes'] = 'ok'
         else:
             perms['kubernetes'] = 'not_installed'
         
         # WireGuard - check if wg binary exists and if we can use it
-        wg_path = self.run_cmd("which wg 2>/dev/null")
+        wg_path = self.run_cmd("which wg 2>/dev/null", timeout=0.5)
         if wg_path:
-            # Try a quick command to see if we have permission
-            test = self.run_cmd("wg show 2>&1 | head -1")
+            # Quick check with short timeout to avoid hanging on dead sockets
+            test = self.run_cmd("wg show 2>&1 | head -1", timeout=0.5)
             if test and "permission" not in test.lower() and "not permitted" not in test.lower():
                 perms['wireguard'] = 'ok'
             else:
@@ -1105,7 +1106,7 @@ class SentinelMonitor:
             self._last_proc_check = current_time
             
             top_cpu_name = ""
-            top_cpu_pct = 0.0
+            top_cpu_delta = 0
             top_mem_name = ""
             top_mem_kb = 0
             
@@ -1115,75 +1116,71 @@ class SentinelMonitor:
             
             current_cpu = {}
             
-            for pid in pids:
-                pid_str = str(pid)
+            for pid_str in pids:
                 try:
                     # Read /proc/<pid>/stat for CPU time
                     with open(f'/proc/{pid_str}/stat', 'r') as f:
                         stat = f.read().strip()
-                    # Parse: comm is field 2 (in parens), utime=14, stime=15
-                    # Find closing paren for comm
-                    rparen = stat.rfind(')')
+                    
+                    # Parse: format is "pid (comm) state utime stime ..."
+                    # Find first '(' and first ')' after it to get comm
+                    lparen = stat.find('(')
+                    if lparen == -1:
+                        continue
+                    rparen = stat.find(')', lparen)
                     if rparen == -1:
                         continue
-                    lparen = stat.find('(')
+                    
                     comm = stat[lparen + 1:rparen]
-                    parts = stat[rparen + 2:].split()
-                    if len(parts) >= 12:
-                        utime = int(parts[11])
-                        stime = int(parts[12])
+                    # After ')', the rest of the fields start with a space
+                    rest = stat[rparen + 1:].strip()
+                    parts = rest.split()
+                    
+                    # utime is field 14, stime is field 15 (0-indexed: 12, 13)
+                    if len(parts) >= 14:
+                        utime = int(parts[12])
+                        stime = int(parts[13])
                         total_cpu = utime + stime
                         current_cpu[pid_str] = (comm, total_cpu)
                         
-                        # Calculate delta
+                        # Calculate delta from previous check
                         prev = self._prev_proc_cpu.get(pid_str)
                         if prev is not None:
                             delta = total_cpu - prev
-                            if delta > top_cpu_pct:
-                                top_cpu_pct = delta
+                            if delta > top_cpu_delta:
+                                top_cpu_delta = delta
                                 top_cpu_name = comm
                 except:
                     continue
                 
                 try:
-                    # Read /proc/<pid>/status for memory
+                    # Read /proc/<pid>/status for memory (RSS)
                     with open(f'/proc/{pid_str}/status', 'r') as f:
                         for line in f:
                             if line.startswith('VmRSS:'):
                                 mem_kb = int(line.split()[1])
                                 if mem_kb > top_mem_kb:
                                     top_mem_kb = mem_kb
-                                    # Re-read comm for memory leader if needed
-                                    if not top_mem_name and pid_str in current_cpu:
+                                    # Get name from current_cpu if we parsed it, otherwise skip
+                                    if pid_str in current_cpu:
                                         top_mem_name = current_cpu[pid_str][0]
                                 break
                 except:
                     continue
             
-            # Use comm from stat for memory leader if we found one
-            if not top_mem_name and top_mem_kb > 0:
-                # Try to find which process has highest memory
-                for pid_str in pids:
-                    try:
-                        with open(f'/proc/{pid_str}/status', 'r') as f:
-                            for line in f:
-                                if line.startswith('VmRSS:'):
-                                    mem_kb = int(line.split()[1])
-                                    if mem_kb == top_mem_kb and pid_str in current_cpu:
-                                        top_mem_name = current_cpu[pid_str][0]
-                                        break
-                                break
-                    except:
-                        continue
-            
+            # Save current CPU times for next delta calculation
             self._prev_proc_cpu = {k: v[1] for k, v in current_cpu.items()}
             
             # Convert CPU ticks to approximate percentage (over 5s interval)
-            # CLOCK_TICKS per second is typically 100 on Linux
-            ticks_per_sec = os.sysconf(os.sysconf_names.get('SC_CLK_TCK', 2)) if hasattr(os, 'sysconf') else 100
+            # sysconf may not exist on all Python builds; fallback to 100 Hz
+            try:
+                ticks_per_sec = os.sysconf(os.sysconf_names.get('SC_CLK_TCK', 2))
+            except:
+                ticks_per_sec = 100
             if ticks_per_sec <= 0:
                 ticks_per_sec = 100
-            cpu_pct = (top_cpu_pct / ticks_per_sec / 5.0) * 100  # 5 second interval
+            
+            cpu_pct = (top_cpu_delta / ticks_per_sec / 5.0) * 100
             
             def shorten(s, max_len=22):
                 if not s or len(s) <= max_len:
@@ -1750,7 +1747,13 @@ class SentinelMonitor:
         
         try:
             for i, line in enumerate(help_lines):
-                stdscr.addstr(start_y + i, start_x, line, curses.color_pair(1))
+                if start_y + i >= h:
+                    break
+                # Truncate if line would exceed terminal width
+                if start_x + len(line) > w:
+                    line = line[:max(0, w - start_x - 1)]
+                if len(line) > 0 and start_x < w - 1:
+                    stdscr.addstr(start_y + i, start_x, line, curses.color_pair(1))
         except curses.error:
             pass
 
@@ -1808,7 +1811,11 @@ class SentinelMonitor:
             for i, line in enumerate(lines):
                 if start_y + i >= h:
                     break
-                stdscr.addstr(start_y + i, start_x, line, curses.color_pair(1))
+                # Truncate if line would exceed terminal width
+                if start_x + len(line) > w:
+                    line = line[:max(0, w - start_x - 1)]
+                if len(line) > 0 and start_x < w - 1:
+                    stdscr.addstr(start_y + i, start_x, line, curses.color_pair(1))
         except curses.error:
             pass
 
@@ -3045,6 +3052,7 @@ Config file locations (in order of priority):
         print("\nYou can customize:")
         print("  - theme: default, nord, dracula, gruvbox, monokai")
         print("  - alerts: cpu_high, cpu_critical, mem_high, temp_high, etc.")
+        print("  - light_mode: true/false (lighter defaults for low-resource machines)")
         print("  - refresh_rate: update interval in seconds")
         return
     

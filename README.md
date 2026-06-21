@@ -207,6 +207,23 @@ journalctl -u sentinel -f
 - Linux kernel 4.0+
 - Optional: lm-sensors, curl, docker, kubectl
 
+## Windows (WSL2)
+
+Sentinel runs on Windows via WSL2 (Windows Subsystem for Linux):
+
+```bash
+# In your WSL2 terminal (Ubuntu/Debian/Arch)
+sudo apt install python3
+curl -sL https://raw.githubusercontent.com/VidGuiCode/sentinel/main/install-sentinel.sh | sudo bash
+sentinel
+```
+
+**Notes:**
+- All features work except temperature sensors and RAPL energy (VM limitation)
+- Docker monitoring works if Docker Desktop WSL2 integration is enabled
+- WireGuard may be limited due to WSL2's NAT network stack
+- Security logs are typically empty unless `sshd` is running inside WSL2
+
 ## Changelog
 
 ### v0.5.0
