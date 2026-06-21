@@ -117,6 +117,7 @@ sentinel                      # Run TUI
 sentinel --theme nord         # Use Nord theme
 sentinel --service            # Headless service mode
 sentinel --init-config        # Create config file
+sentinel --light              # Lightweight mode (low-end VMs, Pi3)
 sentinel --help               # Show options
 ```
 
@@ -129,9 +130,23 @@ sentinel --help               # Show options
 | `t` | Cycle themes |
 | `l` | Cycle layouts |
 | `h` | Toggle help overlay |
+| `d` | Diagnostics / Permission check |
 | `i` | Check public IP |
 | `+` | Faster refresh (min 1s) |
 | `-` | Slower refresh (max 10s) |
+
+### Permission Status
+
+Sentinel now detects and displays permission status for all features in the header:
+
+- **D** = Docker, **K** = Kubernetes, **W** = WireGuard
+- **S** = Security logs, **P** = Proxy logs, **R** = RAPL energy
+- **Green** = working, **Red** = permission denied, **Hidden** = not installed
+
+Press `d` to see a full diagnostics panel with:
+- Which features are available vs. permission-denied
+- Exact commands to fix permissions
+- Real-time status of Docker, K8s, WireGuard, logs, and more
 
 ### Layout Modes
 

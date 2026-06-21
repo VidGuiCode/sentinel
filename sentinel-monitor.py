@@ -221,6 +221,7 @@ class SentinelMonitor:
         self._first_render = True  # Skip expensive ops on first frame
         self._loading = False  # Loading state for modal
         self._show_help = False  # Help overlay toggle
+        self._show_diagnostics = False  # Diagnostics overlay toggle
         
         # Layout mode
         self.layout_mode = self.config.get('layout', 'default')
@@ -244,11 +245,172 @@ class SentinelMonitor:
         self._security_events = []  # Store recent events with timestamps for windowed analysis
         self._ip_failure_tracker = {}  # Track failures per IP with timestamps
 
-        # Update checker (non-blocking, checks once per day)
-        self._update_available = None  # None=unknown, False=up-to-date, version string=available
+        # Permission tracking - detect what's available at startup
+        self._permissions = self._detect_permissions()
+        
+        # Cache /proc/stat for merged CPU reads (performance)
+        self._proc_stat_cache = None
+        self._proc_stat_time = 0
+        
+        # Light mode detection: auto-detect low-resource hardware or use --light flag
+        self._is_light_hw = self._detect_light_hardware()
+        # Also support manual --light flag for any low-end machine
+        self._light_mode = self._is_light_hw or self.config.get('light_mode', False)
+        if self._light_mode:
+            # Reduce defaults for low-resource machines
+            self.refresh_rate = max(3, self.refresh_rate)
+            self.cpu_history = deque([0] * 50, maxlen=50)
+            self.mem_history = deque([0] * 50, maxlen=50)
+            self.rx_history = deque([0] * 50, maxlen=50)
+            self.tx_history = deque([0] * 50, maxlen=50)
+            self.power_history = deque([0] * 50, maxlen=50)
+            self.failed_login_history = deque([0] * 50, maxlen=50)
+            self.suspicious_ip_history = deque([0] * 50, maxlen=50)
+        
+        # Cache layout calculations
+        self._last_layout_dims = (0, 0, 0, 0, '')
+        self._cached_layout = None
+
+        # Non-blocking update checker
+        self._update_available = None
         self._last_update_check = 0
-        self._update_check_interval = 86400  # 24 hours
+        self._update_check_interval = 604800 if self._light_mode else 86400  # Weekly in light mode
         self._compiled_regex = {}  # Cache compiled regex patterns for performance
+
+    def _detect_light_hardware(self):
+        """Detect low-resource hardware (e.g., Raspberry Pi, low-RAM VPS) for lighter defaults."""
+        try:
+            with open('/proc/cpuinfo', 'r') as f:
+                cpuinfo = f.read()
+            # Raspberry Pi 4
+            if 'BCM2711' in cpuinfo or 'Raspberry Pi 4' in cpuinfo:
+                return True
+            # Check device tree model
+            model_path = Path('/sys/firmware/devicetree/base/model')
+            if model_path.exists():
+                model = model_path.read_text().strip('\x00')
+                if 'Pi 4' in model or 'Raspberry Pi 4' in model:
+                    return True
+            # Check for very low RAM (< 1GB)
+            try:
+                with open('/proc/meminfo', 'r') as f:
+                    for line in f:
+                        if line.startswith('MemTotal'):
+                            mem_kb = int(line.split()[1])
+                            if mem_kb < 1024 * 1024:  # Less than 1GB
+                                return True
+                            break
+            except:
+                pass
+        except:
+            pass
+        return False
+
+    def _detect_permissions(self):
+        """Detect which features are available based on permissions.
+        Returns dict with feature -> status mapping.
+        Status: 'ok', 'no_perm', 'not_installed', 'disabled'
+        """
+        perms = {}
+        
+        # Docker - check socket access
+        docker_sock = '/var/run/docker.sock'
+        if os.path.exists(docker_sock):
+            if os.access(docker_sock, os.R_OK) or os.access(docker_sock, os.W_OK):
+                perms['docker'] = 'ok'
+            else:
+                perms['docker'] = 'no_perm'
+        else:
+            perms['docker'] = 'not_installed'
+        
+        # Kubernetes - check kubectl availability
+        kubectl_path = self.run_cmd("which kubectl 2>/dev/null")
+        if kubectl_path:
+            perms['kubernetes'] = 'ok'
+        else:
+            perms['kubernetes'] = 'not_installed'
+        
+        # WireGuard - check if wg binary exists and if we can use it
+        wg_path = self.run_cmd("which wg 2>/dev/null")
+        if wg_path:
+            # Try a quick command to see if we have permission
+            test = self.run_cmd("wg show 2>&1 | head -1")
+            if test and "permission" not in test.lower() and "not permitted" not in test.lower():
+                perms['wireguard'] = 'ok'
+            else:
+                perms['wireguard'] = 'no_perm'
+        else:
+            perms['wireguard'] = 'not_installed'
+        
+        # RAPL energy - check if readable
+        if self.rapl_path and os.path.exists(self.rapl_path):
+            if os.access(self.rapl_path, os.R_OK):
+                perms['rapl'] = 'ok'
+            else:
+                perms['rapl'] = 'no_perm'
+        else:
+            perms['rapl'] = 'not_installed'
+        
+        # Security logs - check each log file
+        log_status = {}
+        has_any = False
+        for log_name, log_path in self.security_logs.items():
+            if os.path.exists(log_path):
+                if os.access(log_path, os.R_OK):
+                    log_status[log_name] = 'ok'
+                    has_any = True
+                else:
+                    log_status[log_name] = 'no_perm'
+            else:
+                log_status[log_name] = 'not_found'
+        perms['security_logs'] = log_status
+        perms['security'] = 'ok' if has_any else 'no_perm'
+        
+        # Proxy logs - check each log file
+        proxy_status = {}
+        has_any_proxy = False
+        for proxy_name, log_path in self.proxy_logs.items():
+            if os.path.exists(log_path):
+                if os.access(log_path, os.R_OK):
+                    proxy_status[proxy_name] = 'ok'
+                    has_any_proxy = True
+                else:
+                    proxy_status[proxy_name] = 'no_perm'
+            else:
+                proxy_status[proxy_name] = 'not_found'
+        perms['proxy_logs'] = proxy_status
+        perms['proxy'] = 'ok' if has_any_proxy else 'not_installed'
+        
+        # Battery - always readable (if exists)
+        perms['battery'] = 'ok' if os.path.exists('/sys/class/power_supply/BAT0') else 'not_installed'
+        
+        # Temperature sensors - check readability
+        if os.path.exists('/sys/class/thermal/thermal_zone0/temp'):
+            perms['temperature'] = 'ok'
+        elif os.path.exists('/sys/class/hwmon'):
+            perms['temperature'] = 'ok'
+        else:
+            perms['temperature'] = 'not_installed'
+        
+        return perms
+
+    def get_permission_help(self):
+        """Generate user-friendly permission fix commands."""
+        help_text = []
+        if self._permissions.get('docker') == 'no_perm':
+            help_text.append("Docker: sudo usermod -aG docker $USER  (then re-login)")
+        if self._permissions.get('wireguard') == 'no_perm':
+            help_text.append("WireGuard: sudo setcap cap_net_admin+ep $(which wg)  or  sudo visudo -> add NOPASSWD for wg")
+        if self._permissions.get('rapl') == 'no_perm':
+            help_text.append("RAPL: sudo chmod 644 /sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj")
+        
+        # Check security logs
+        for log_name, status in self._permissions.get('security_logs', {}).items():
+            if status == 'no_perm':
+                help_text.append(f"Logs: sudo usermod -aG adm,syslog $USER  (for {log_name})")
+                break
+        
+        return help_text
 
     def _detect_default_interface(self):
         """Detect default network interface from routing table."""
@@ -311,24 +473,30 @@ class SentinelMonitor:
             return None
 
     def get_cpu_info(self):
-        """Get CPU information - optimized with direct /proc reads."""
-        # Calculate CPU usage from /proc/stat (much faster than top)
+        """Get CPU information - optimized with single /proc/stat read."""
+        # Read /proc/stat once and cache for per-core usage too
+        proc_stat_lines = []
         try:
             with open('/proc/stat', 'r') as f:
-                line = f.readline()
-                parts = line.split()[1:8]  # user, nice, system, idle, iowait, irq, softirq
-                times = [int(x) for x in parts]
-                idle = times[3] + times[4]  # idle + iowait
-                total = sum(times)
-                
-                if self.last_cpu_times:
-                    idle_delta = idle - self.last_cpu_times['idle']
-                    total_delta = total - self.last_cpu_times['total']
-                    cpu_usage = 100.0 * (1.0 - idle_delta / total_delta) if total_delta > 0 else 0.0
-                else:
-                    cpu_usage = 0.0
-                
-                self.last_cpu_times = {'idle': idle, 'total': total}
+                proc_stat_lines = f.readlines()
+            self._proc_stat_cache = proc_stat_lines
+            self._proc_stat_time = time.time()
+            
+            # Parse first line (aggregate CPU)
+            line = proc_stat_lines[0]
+            parts = line.split()[1:8]  # user, nice, system, idle, iowait, irq, softirq
+            times = [int(x) for x in parts]
+            idle = times[3] + times[4]  # idle + iowait
+            total = sum(times)
+            
+            if self.last_cpu_times:
+                idle_delta = idle - self.last_cpu_times['idle']
+                total_delta = total - self.last_cpu_times['total']
+                cpu_usage = 100.0 * (1.0 - idle_delta / total_delta) if total_delta > 0 else 0.0
+            else:
+                cpu_usage = 0.0
+            
+            self.last_cpu_times = {'idle': idle, 'total': total}
         except:
             cpu_usage = 0.0
         
@@ -377,11 +545,12 @@ class SentinelMonitor:
         }
 
     def _get_per_core_usage(self):
-        """Get per-core CPU usage from /proc/stat."""
+        """Get per-core CPU usage from cached /proc/stat data."""
+        lines = self._proc_stat_cache if self._proc_stat_cache else []
+        if not lines:
+            return [0.0] * self.cpu_cores
+        
         try:
-            with open('/proc/stat', 'r') as f:
-                lines = f.readlines()
-            
             core_usages = []
             for line in lines[1:]:  # Skip first line (total)
                 if not line.startswith('cpu'):
@@ -608,10 +777,11 @@ class SentinelMonitor:
         return disks
 
     def _get_docker_volumes(self):
-        """Get Docker volume usage information."""
+        """Get Docker volume usage information - respects permission cache."""
         volumes = []
         
-        if not os.path.exists('/var/run/docker.sock'):
+        # Check permission cache first
+        if self._permissions.get('docker') != 'ok':
             return volumes
         
         try:
@@ -789,21 +959,40 @@ class SentinelMonitor:
         }
 
     def _get_local_ip(self, iface):
-        """Get local IP address for interface."""
+        """Get local IP address for interface - cached, no external network call."""
         if not iface:
             return "N/A"
+        
+        # Cache local IP - it rarely changes
+        current_time = time.time()
+        if hasattr(self, '_cached_local_ip') and hasattr(self, '_cached_local_ip_time'):
+            if current_time - self._cached_local_ip_time < 30:
+                return self._cached_local_ip
+        
         try:
-            # Try to get IP from socket
+            # Try reading from /proc/net/dev or use socket (cached)
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(1)  # 1 second timeout to prevent hanging
             s.connect(("8.8.8.8", 80))
             ip = s.getsockname()[0]
             s.close()
+            self._cached_local_ip = ip
+            self._cached_local_ip_time = current_time
             return ip
         except:
+            self._cached_local_ip = "N/A"
+            self._cached_local_ip_time = current_time
             return "N/A"
 
     def get_vpn_connections(self):
-        """Return WireGuard peers with quick stats"""
+        """Return WireGuard peers with quick stats - respects permission cache."""
+        # Skip if WireGuard is not available or no permission
+        if self._permissions.get('wireguard') == 'not_installed':
+            return []
+        if self._permissions.get('wireguard') == 'no_perm':
+            self.wg_permission_denied = True
+            return []
+        
         dump, permission_denied = self.get_wireguard_dump()
         self.wg_permission_denied = permission_denied and not dump
         connections = []
@@ -867,7 +1056,14 @@ class SentinelMonitor:
         return connections
 
     def get_wireguard_dump(self):
-        """Return raw wg dump output, attempting sudo if necessary"""
+        """Return raw wg dump output, attempting sudo if necessary."""
+        # Check cached permission first
+        wg_perm = self._permissions.get('wireguard', 'not_installed')
+        if wg_perm == 'not_installed':
+            return "", False
+        if wg_perm == 'no_perm':
+            return "", True
+        
         commands = [
             "wg show all dump 2>&1",
             "sudo -n wg show all dump 2>&1"
@@ -896,32 +1092,106 @@ class SentinelMonitor:
             self._public_ip_cache = "N/A"
 
     def get_processes(self):
-        """Get process information - optimized with /proc reads."""
+        """Get process information - direct /proc reads, no subprocess."""
         try:
-            # Count processes from /proc
-            total = len([d for d in os.listdir('/proc') if d.isdigit()])
+            pids = [d for d in os.listdir('/proc') if d.isdigit()]
+            total = len(pids)
         except:
             total = 0
+            pids = []
         
-        # Cache top processes - only update every 5 seconds (expensive ps calls)
         current_time = time.time()
         if not hasattr(self, '_last_proc_check') or current_time - self._last_proc_check > 5:
             self._last_proc_check = current_time
-            # Still use ps for top processes (complex to replicate efficiently)
-            top_cpu = self.run_cmd("ps aux --sort=-%cpu | head -2 | tail -1 | awk '{print $11\" \"$3\"%\"}'") 
-            top_mem = self.run_cmd("ps aux --sort=-%mem | head -2 | tail -1 | awk '{print $11\" \"$4\"%\"}'")
-
-            # Shorten names
-            def shorten(s, max_len=25):
+            
+            top_cpu_name = ""
+            top_cpu_pct = 0.0
+            top_mem_name = ""
+            top_mem_kb = 0
+            
+            # Initialize previous CPU tracking
+            if not hasattr(self, '_prev_proc_cpu'):
+                self._prev_proc_cpu = {}
+            
+            current_cpu = {}
+            
+            for pid in pids:
+                pid_str = str(pid)
+                try:
+                    # Read /proc/<pid>/stat for CPU time
+                    with open(f'/proc/{pid_str}/stat', 'r') as f:
+                        stat = f.read().strip()
+                    # Parse: comm is field 2 (in parens), utime=14, stime=15
+                    # Find closing paren for comm
+                    rparen = stat.rfind(')')
+                    if rparen == -1:
+                        continue
+                    lparen = stat.find('(')
+                    comm = stat[lparen + 1:rparen]
+                    parts = stat[rparen + 2:].split()
+                    if len(parts) >= 12:
+                        utime = int(parts[11])
+                        stime = int(parts[12])
+                        total_cpu = utime + stime
+                        current_cpu[pid_str] = (comm, total_cpu)
+                        
+                        # Calculate delta
+                        prev = self._prev_proc_cpu.get(pid_str)
+                        if prev is not None:
+                            delta = total_cpu - prev
+                            if delta > top_cpu_pct:
+                                top_cpu_pct = delta
+                                top_cpu_name = comm
+                except:
+                    continue
+                
+                try:
+                    # Read /proc/<pid>/status for memory
+                    with open(f'/proc/{pid_str}/status', 'r') as f:
+                        for line in f:
+                            if line.startswith('VmRSS:'):
+                                mem_kb = int(line.split()[1])
+                                if mem_kb > top_mem_kb:
+                                    top_mem_kb = mem_kb
+                                    # Re-read comm for memory leader if needed
+                                    if not top_mem_name and pid_str in current_cpu:
+                                        top_mem_name = current_cpu[pid_str][0]
+                                break
+                except:
+                    continue
+            
+            # Use comm from stat for memory leader if we found one
+            if not top_mem_name and top_mem_kb > 0:
+                # Try to find which process has highest memory
+                for pid_str in pids:
+                    try:
+                        with open(f'/proc/{pid_str}/status', 'r') as f:
+                            for line in f:
+                                if line.startswith('VmRSS:'):
+                                    mem_kb = int(line.split()[1])
+                                    if mem_kb == top_mem_kb and pid_str in current_cpu:
+                                        top_mem_name = current_cpu[pid_str][0]
+                                        break
+                                break
+                    except:
+                        continue
+            
+            self._prev_proc_cpu = {k: v[1] for k, v in current_cpu.items()}
+            
+            # Convert CPU ticks to approximate percentage (over 5s interval)
+            # CLOCK_TICKS per second is typically 100 on Linux
+            ticks_per_sec = os.sysconf(os.sysconf_names.get('SC_CLK_TCK', 2)) if hasattr(os, 'sysconf') else 100
+            if ticks_per_sec <= 0:
+                ticks_per_sec = 100
+            cpu_pct = (top_cpu_pct / ticks_per_sec / 5.0) * 100  # 5 second interval
+            
+            def shorten(s, max_len=22):
                 if not s or len(s) <= max_len:
                     return s
-                parts = s.rsplit(' ', 1)
-                if len(parts) == 2:
-                    return parts[0][:max_len-4] + "… " + parts[1]
-                return s[:max_len]
+                return s[:max_len-1] + "…"
             
-            self._cached_top_cpu = shorten(top_cpu)
-            self._cached_top_mem = shorten(top_mem)
+            self._cached_top_cpu = f"{shorten(top_cpu_name)} {cpu_pct:.1f}%" if top_cpu_name else ""
+            self._cached_top_mem = f"{shorten(top_mem_name)} {top_mem_kb / 1024:.1f}M" if top_mem_name else ""
         
         return {
             'total': total,
@@ -930,7 +1200,7 @@ class SentinelMonitor:
         }
 
     def get_docker_info(self, skip_stats=False):
-        """Get Docker container information.
+        """Get Docker container information - respects permission cache.
         
         Args:
             skip_stats: If True, skip per-container stats (faster startup)
@@ -942,6 +1212,10 @@ class SentinelMonitor:
             'total': 0,
             'containers': []
         }
+        
+        # Check permission cache first
+        if self._permissions.get('docker') != 'ok':
+            return result
         
         # Cache docker availability check
         if self._docker_available is None:
@@ -1127,40 +1401,79 @@ class SentinelMonitor:
         except:
             return 0, 0, 0
 
+    def _read_log_tail(self, log_path, max_lines=100):
+        """Read last N lines of a log file efficiently by seeking from end.
+        Much faster than reading the entire file, especially for large logs."""
+        try:
+            if not os.path.exists(log_path) or not os.access(log_path, os.R_OK):
+                return []
+            
+            with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
+                # Seek near end of file to avoid reading entire large log
+                try:
+                    f.seek(0, 2)  # Seek to end
+                    size = f.tell()
+                    # Estimate bytes needed: ~256 bytes per line * max_lines + buffer
+                    buf_size = min(32768, size)  # Read up to 32KB from end
+                    if size > buf_size:
+                        f.seek(-buf_size, 2)
+                    else:
+                        f.seek(0)
+                    
+                    raw = f.read()
+                    lines = raw.split('\n')
+                    # If we didn't seek to 0, first line may be partial - drop it
+                    if size > buf_size and len(lines) > 1:
+                        lines = lines[1:]
+                    # Keep only last max_lines
+                    return lines[-max_lines:] if len(lines) > max_lines else lines
+                except:
+                    # Fallback: read from start (for very small files or errors)
+                    f.seek(0)
+                    lines = []
+                    for line in f:
+                        lines.append(line.rstrip('\n'))
+                        if len(lines) > max_lines * 2:
+                            lines = lines[-max_lines:]
+                    return lines[-max_lines:] if len(lines) > max_lines else lines
+        except:
+            return []
+
     def get_proxy_stats(self):
-        """Get reverse proxy traffic stats from nginx/caddy access logs."""
+        """Get reverse proxy traffic stats from nginx/caddy access logs - direct file read."""
         current_time = time.time()
         
-        # Only check every 5 seconds
-        if current_time - self._last_proxy_check < 5:
+        # Only check every 10 seconds (increased from 5s in light mode)
+        check_interval = 10 if self._light_mode else 5
+        if current_time - self._last_proxy_check < check_interval:
             return self._proxy_stats
         
         self._last_proxy_check = current_time
         stats = {'requests': 0, 'bytes': 0, 'rps': 0.0, 'source': None}
         
+        # Check permission status first
+        if self._permissions.get('proxy') == 'not_installed':
+            self._proxy_stats = stats
+            return stats
+        
         # Try nginx first, then caddy
         for proxy_name, log_path in self.proxy_logs.items():
-            if not os.path.exists(log_path):
+            log_status = self._permissions.get('proxy_logs', {}).get(proxy_name, 'not_found')
+            if log_status != 'ok':
                 continue
             
             try:
-                # Get last 100 lines and count requests in last minute
-                output = self.run_cmd(f"tail -100 {log_path} 2>/dev/null")
-                if not output:
+                lines = self._read_log_tail(log_path, max_lines=100)
+                if not lines:
                     continue
                 
-                lines = output.strip().split('\n')
-                now = time.time()
                 recent_count = 0
                 total_bytes = 0
                 
                 for line in lines:
-                    # Parse common log format or JSON
                     try:
-                        # Try to extract bytes (common log format: ... 200 1234)
                         parts = line.split()
                         if len(parts) >= 10:
-                            # Bytes is usually the 10th field in common log format
                             bytes_str = parts[9] if parts[9].isdigit() else parts[-1]
                             if bytes_str.isdigit():
                                 total_bytes += int(bytes_str)
@@ -1171,7 +1484,7 @@ class SentinelMonitor:
                 if recent_count > 0:
                     stats['requests'] = recent_count
                     stats['bytes'] = total_bytes
-                    stats['rps'] = recent_count / 60.0  # Approximate RPS
+                    stats['rps'] = recent_count / 60.0
                     stats['source'] = proxy_name
                     break
                     
@@ -1179,33 +1492,27 @@ class SentinelMonitor:
                 pass
         
         self._proxy_stats = stats
-        self.proxy_history.append(stats.get('rps', 0) * 10)  # Scale for visibility
+        self.proxy_history.append(stats.get('rps', 0) * 10)
         return stats
 
     def check_for_updates(self):
-        """Check GitHub for newer version (non-blocking, cached for 24h)."""
+        """Check GitHub for newer version (non-blocking, cached)."""
         current_time = time.time()
 
-        # Only check once per day to avoid GitHub rate limits and reduce overhead
         if current_time - self._last_update_check < self._update_check_interval:
             return self._update_available
 
         self._last_update_check = current_time
 
         try:
-            # Quick, lightweight check using curl with timeout
-            # Fetches the VERSION line from the raw GitHub file
             github_raw = "https://raw.githubusercontent.com/VidGuiCode/sentinel/main/sentinel-monitor.py"
             cmd = f"curl -s -m 3 {github_raw} | grep -m 1 '^VERSION = ' | cut -d'\"' -f2"
             remote_version = self.run_cmd(cmd, timeout=4)
 
             if remote_version and remote_version != VERSION:
-                # Parse versions to compare (e.g., "0.5.0" vs "0.4.0")
                 try:
                     remote_parts = [int(x) for x in remote_version.split('.')]
                     current_parts = [int(x) for x in VERSION.split('.')]
-
-                    # Compare major.minor.patch
                     if remote_parts > current_parts:
                         self._update_available = remote_version
                     else:
@@ -1216,13 +1523,12 @@ class SentinelMonitor:
                 self._update_available = False
 
         except:
-            # If check fails, silently continue (don't bother the user)
             self._update_available = False
 
         return self._update_available
 
     def get_security_logs(self):
-        """Get security events from system logs (auth, syslog, secure)."""
+        """Get security events from system logs - direct file read, no subprocess."""
         current_time = time.time()
 
         # Only check every 5 seconds
@@ -1231,11 +1537,9 @@ class SentinelMonitor:
 
         self._last_security_check = current_time
 
-        # Pre-compile regex patterns for performance (cached in self._compiled_regex)
-        # These patterns match the EXACT same format as the working log analyzer
+        # Pre-compile regex patterns for performance
         if not self._compiled_regex:
             self._compiled_regex = {
-                # Event patterns - search WITHIN message, not match from start (like working analyzer)
                 'invalid_user': re.compile(r'Invalid user (\S+) from ([\d.]+)'),
                 'failed_password': re.compile(r'Failed password for (?:invalid user )?(\S+) from ([\d.]+)'),
                 'connection_closed': re.compile(r'Connection closed by invalid user'),
@@ -1249,11 +1553,11 @@ class SentinelMonitor:
             'failed_logins': 0,
             'successful_logins': 0,
             'failed_ratio': 0.0,
-            'top_ips': {},  # IP -> count mapping
-            'top_users': {},  # user -> count mapping
-            'error_types': {},  # error type -> count mapping
-            'recent_events': [],  # Last few parsed events
-            'alerts': [],  # Active security alerts
+            'top_ips': {},
+            'top_users': {},
+            'error_types': {},
+            'recent_events': [],
+            'alerts': [],
         }
 
         # Clean up old events (older than 5 minutes)
@@ -1266,29 +1570,33 @@ class SentinelMonitor:
             if not self._ip_failure_tracker[ip]:
                 del self._ip_failure_tracker[ip]
 
+        # Check permission status first
+        if self._permissions.get('security') == 'no_perm':
+            self._security_cache = stats
+            return stats
+
         # Try auth.log first (Debian/Ubuntu), then secure (RHEL/CentOS), then syslog
+        # Use smaller line count in light mode for performance
+        max_lines = 200 if self._light_mode else 1000
+        
         for log_name, log_path in self.security_logs.items():
-            if not os.path.exists(log_path):
+            log_status = self._permissions.get('security_logs', {}).get(log_name, 'not_found')
+            if log_status != 'ok':
                 continue
 
             try:
-                # Get last 1000 lines for analysis (increased for better threat detection)
-                output = self.run_cmd(f"tail -1000 {log_path} 2>/dev/null", timeout=3)
-                if not output:
+                lines = self._read_log_tail(log_path, max_lines=max_lines)
+                if not lines:
                     continue
 
-                lines = output.strip().split('\n')
                 stats['available'] = True
 
                 for line in lines:
                     if not line.strip():
                         continue
 
-                    # Parse each line using search (not match) to find patterns WITHIN the line
-                    # This matches the working log analyzer's approach
-                    stats['total_parsed'] += 1  # Count all lines as parsed
+                    stats['total_parsed'] += 1
 
-                    # Check for invalid user attempts
                     invalid_match = self._compiled_regex['invalid_user'].search(line)
                     if invalid_match:
                         username, ip = invalid_match.groups()
@@ -1310,7 +1618,6 @@ class SentinelMonitor:
                         self._security_events.append(event)
                         continue
 
-                    # Check for failed password attempts
                     failed_match = self._compiled_regex['failed_password'].search(line)
                     if failed_match:
                         username, ip = failed_match.groups()
@@ -1324,12 +1631,10 @@ class SentinelMonitor:
                         self._ip_failure_tracker[ip].append(current_time)
                         continue
 
-                    # Check for connection closed events
                     if self._compiled_regex['connection_closed'].search(line):
                         stats['error_types']['Connection closed (invalid user)'] = stats['error_types'].get('Connection closed (invalid user)', 0) + 1
                         continue
 
-                    # Check for successful logins
                     success_match = self._compiled_regex['accepted_key'].search(line)
                     if success_match:
                         username, ip = success_match.groups()
@@ -1350,7 +1655,6 @@ class SentinelMonitor:
                 stats['recent_events'] = stats['recent_events'][-5:]
 
                 # Check for alerts
-                # Alert 1: >20 failed logins from same IP in 5 minutes
                 for ip, timestamps in self._ip_failure_tracker.items():
                     if len(timestamps) >= self.security_alerts_config['failed_login_threshold']:
                         stats['alerts'].append({
@@ -1420,22 +1724,23 @@ class SentinelMonitor:
             pass
 
     def draw_help_modal(self, stdscr, h, w):
-        """Draw help overlay with keybindings."""
+        """Draw help overlay with keybindings and permission status."""
         help_lines = [
-            "╭─────────── HELP ───────────╮",
-            "│                            │",
-            "│  q      Quit               │",
-            "│  r      Refresh now        │",
-            "│  t      Cycle themes       │",
-            "│  l      Cycle layouts      │",
-            "│  i      Refresh public IP  │",
-            "│  h      Toggle this help   │",
-            "│  +/-    Adjust refresh     │",
-            "│                            │",
-            "│  Layouts: default, cpu,    │",
-            "│    network, docker, minimal│",
-            "│                            │",
-            "╰────────────────────────────╯",
+            "╭────────────── HELP ──────────────╮",
+            "│                                  │",
+            "│  q      Quit                     │",
+            "│  r      Refresh now              │",
+            "│  t      Cycle themes             │",
+            "│  l      Cycle layouts            │",
+            "│  i      Refresh public IP        │",
+            "│  h      Toggle this help         │",
+            "│  d      Diagnostics / Permissions│",
+            "│  +/-    Adjust refresh rate      │",
+            "│                                  │",
+            "│  Layouts: default, cpu, network, │",
+            "│    docker, security, minimal     │",
+            "│                                  │",
+            "╰──────────────────────────────────╯",
         ]
         
         modal_h = len(help_lines)
@@ -1445,6 +1750,64 @@ class SentinelMonitor:
         
         try:
             for i, line in enumerate(help_lines):
+                stdscr.addstr(start_y + i, start_x, line, curses.color_pair(1))
+        except curses.error:
+            pass
+
+    def draw_diagnostics_modal(self, stdscr, h, w):
+        """Draw diagnostics overlay showing permission status and fixes."""
+        lines = ["╭────────── DIAGNOSTICS ──────────╮"]
+        lines.append("│  Feature        Status          │")
+        lines.append("│  ─────────────────────────────  │")
+        
+        status_map = {
+            'ok': ('✓', 2),
+            'no_perm': ('✗', 4),
+            'not_installed': ('-', 8),
+            'not_found': ('?', 8),
+        }
+        
+        features = [
+            ('Docker', 'docker'),
+            ('Kubernetes', 'kubernetes'),
+            ('WireGuard', 'wireguard'),
+            ('RAPL Energy', 'rapl'),
+            ('Battery', 'battery'),
+            ('Temperature', 'temperature'),
+            ('Security Logs', 'security'),
+            ('Proxy Logs', 'proxy'),
+        ]
+        
+        for name, key in features:
+            status = self._permissions.get(key, 'not_installed')
+            icon, color = status_map.get(status, ('?', 8))
+            status_text = status.replace('_', ' ')
+            line = f"│  {icon} {name:12} {status_text:15} │"
+            lines.append(line)
+        
+        lines.append("│                                 │")
+        # Show fix commands
+        help_text = self.get_permission_help()
+        if help_text:
+            lines.append("│  Fix commands:                  │")
+            for cmd in help_text[:3]:
+                truncated = cmd[:28]
+                lines.append(f"│  {truncated:29} │")
+        else:
+            lines.append("│  All permissions OK!            │")
+        
+        lines.append("│                                 │")
+        lines.append("╰─ Press d to close ──────────────╯")
+        
+        modal_h = len(lines)
+        modal_w = len(lines[0])
+        start_y = max(0, (h - modal_h) // 2)
+        start_x = max(0, (w - modal_w) // 2)
+        
+        try:
+            for i, line in enumerate(lines):
+                if start_y + i >= h:
+                    break
                 stdscr.addstr(start_y + i, start_x, line, curses.color_pair(1))
         except curses.error:
             pass
@@ -1552,21 +1915,58 @@ class SentinelMonitor:
             pass
 
     def draw_header(self, stdscr, width, uptime_str):
-        """Draw clean minimal header - btop style."""
+        """Draw clean minimal header with permission status indicators."""
         timestamp = datetime.now().strftime("%H:%M:%S")
         try:
             # Single clean line with key info
             stdscr.addstr(0, 1, "sentinel", curses.color_pair(1) | curses.A_BOLD)
             stdscr.addstr(0, 10, f"v{VERSION}", curses.color_pair(8))
             
+            # Permission indicators after version
+            perm_x = 16
+            perm_icons = []
+            # D = Docker, K = K8s, W = WireGuard, S = Security, P = Proxy, R = RAPL
+            if self._permissions.get('docker') == 'ok':
+                perm_icons.append(('D', 2))  # Green
+            elif self._permissions.get('docker') == 'no_perm':
+                perm_icons.append(('D', 4))  # Red
+            
+            if self._permissions.get('kubernetes') == 'ok':
+                perm_icons.append(('K', 2))
+            
+            if self._permissions.get('wireguard') == 'ok':
+                perm_icons.append(('W', 2))
+            elif self._permissions.get('wireguard') == 'no_perm':
+                perm_icons.append(('W', 4))
+            
+            if self._permissions.get('security') == 'ok':
+                perm_icons.append(('S', 2))
+            elif self._permissions.get('security') == 'no_perm':
+                perm_icons.append(('S', 4))
+            
+            if self._permissions.get('proxy') == 'ok':
+                perm_icons.append(('P', 2))
+            
+            if self._permissions.get('rapl') == 'ok':
+                perm_icons.append(('R', 2))
+            elif self._permissions.get('rapl') == 'no_perm':
+                perm_icons.append(('R', 4))
+            
+            for char, color in perm_icons:
+                if perm_x < width - 30:
+                    stdscr.addstr(0, perm_x, char, curses.color_pair(color) | curses.A_BOLD)
+                    perm_x += 2
+            
             # Hostname centered
             host_text = self.hostname
             host_x = (width - len(host_text)) // 2
-            stdscr.addstr(0, host_x, host_text, curses.color_pair(7))
+            if host_x > perm_x + 2:
+                stdscr.addstr(0, host_x, host_text, curses.color_pair(7))
             
             # Right side: uptime and time
             right_text = f"up {uptime_str}  {timestamp}"
-            stdscr.addstr(0, width - len(right_text) - 1, f"up {uptime_str}", curses.color_pair(2))
+            if width - len(right_text) - 1 > 0:
+                stdscr.addstr(0, width - len(right_text) - 1, f"up {uptime_str}", curses.color_pair(2))
             stdscr.addstr(0, width - len(timestamp) - 1, timestamp, curses.color_pair(8))
         except curses.error:
             pass
@@ -2472,26 +2872,35 @@ class SentinelMonitor:
                         if update_x + len(update_text) < w - 30:  # Leave room for alerts
                             stdscr.addstr(footer_y, update_x, update_text, curses.color_pair(2) | curses.A_DIM)
 
-                    # Show alerts on right side
+                    # Show alerts on right side - color-only, no blink (fixes performance and UX)
                     if active_alerts:
                         alert_x = w - 2
                         for alert_name, alert_val, alert_type in reversed(active_alerts[:3]):
                             alert_text = f" {alert_name} "
                             alert_x -= len(alert_text)
                             color = curses.color_pair(4) if alert_type == 'danger' else curses.color_pair(3)
-                            stdscr.addstr(footer_y, alert_x, alert_text, color | curses.A_BOLD | curses.A_BLINK)
+                            stdscr.addstr(footer_y, alert_x, alert_text, color | curses.A_BOLD | curses.A_REVERSE)
                 except curses.error:
                     pass
 
                 # Draw help overlay if active
                 if self._show_help:
                     self.draw_help_modal(stdscr, h, w)
+                
+                # Draw diagnostics overlay if active
+                if self._show_diagnostics:
+                    self.draw_diagnostics_modal(stdscr, h, w)
 
                 stdscr.refresh()
 
                 # Input handling
                 key = stdscr.getch()
-                if key == ord('q') or key == ord('Q'):
+                if key == curses.KEY_RESIZE:
+                    # Terminal resized - recalculate layout
+                    self._cached_layout = None
+                    self._last_layout_dims = (0, 0, 0, 0, '')
+                    continue
+                elif key == ord('q') or key == ord('Q'):
                     break
                 elif key == ord('r') or key == ord('R'):
                     self.last_update = 0
@@ -2500,6 +2909,10 @@ class SentinelMonitor:
                     self._last_ip_check = 0
                 elif key == ord('h') or key == ord('H'):
                     self._show_help = not self._show_help
+                    self._show_diagnostics = False  # Close diagnostics if help opened
+                elif key == ord('d') or key == ord('D'):
+                    self._show_diagnostics = not self._show_diagnostics
+                    self._show_help = False  # Close help if diagnostics opened
                 elif key == ord('t') or key == ord('T'):
                     # Cycle through themes
                     theme_list = list(THEMES.keys())
@@ -2598,6 +3011,7 @@ def main():
 Examples:
   sentinel                    # Run interactive TUI
   sentinel --theme nord       # Use Nord color theme
+  sentinel --light             # Lightweight mode (low-end VMs, Pi3)
   sentinel --service          # Run in headless service mode
   sentinel --init-config      # Create default config file
 
@@ -2619,6 +3033,8 @@ Config file locations (in order of priority):
                         help='Create default config file')
     parser.add_argument('--config', '-c', type=str,
                         help='Path to config file')
+    parser.add_argument('--light', action='store_true',
+                        help='Lightweight mode: smaller history, slower refresh, less data (good for low-end VMs)')
     
     args = parser.parse_args()
     
@@ -2638,6 +3054,9 @@ Config file locations (in order of priority):
     # Override with command line args
     if args.theme:
         config['theme'] = args.theme
+    
+    if args.light:
+        config['light_mode'] = True
     
     if args.config:
         try:
