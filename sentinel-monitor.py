@@ -50,7 +50,7 @@ from datetime import datetime, timedelta
 from collections import deque
 from pathlib import Path
 
-VERSION = "0.6.1"
+VERSION = "0.6.2"
 
 # Profiling instrumentation (active only when SENTINEL_PROFILE is set to a path)
 _PROFILE_PATH = os.environ.get('SENTINEL_PROFILE')
@@ -111,6 +111,15 @@ DEFAULT_CONFIG = {
         'error_rate_threshold': 10,
         'error_rate_window': 60,  # 1 minute in seconds
     },
+    # Service health checks (v0.6.2): HTTP probing per container name plus
+    # plain TCP listener checks. A container can be "running" while the app
+    # inside has crashed; these say whether it actually answers.
+    'health_checks': {
+        # 'nginx-proxy': {'url': 'http://localhost:80', 'expect': 200},
+    },
+    'listeners': [
+        # 22, 80, 443,
+    ],
 }
 
 # Color themes
@@ -572,6 +581,12 @@ class SentinelMonitor:
 
         # Permission tracking - detect what's available at startup
         self._permissions = self._detect_permissions()
+
+        # Service health checks (v0.6.2): config per container name plus a
+        # plain port list. Checked on their own slow collector, merged into
+        # the docker snapshot by update_data().
+        self.health_checks = self.config.get('health_checks', {}) or {}
+        self.listeners = self.config.get('listeners', []) or []
         
         # Cache /proc/stat for merged CPU reads (performance)
         self._proc_stat_cache = None
@@ -645,6 +660,7 @@ class SentinelMonitor:
                                      self._collect_update_check)
         self._register_collector('probes', 30, self._collect_probes)
         self._register_collector('ssid', 60, self._collect_ssid)
+        self._register_collector('health', 30, self._collect_health)
         for collector in self.collectors.values():
             collector.start()
 
@@ -712,6 +728,9 @@ class SentinelMonitor:
                                  '' if self.config.get('public_ip_check', True)
                                  else 'disabled in config (public_ip_check: false)')
         self._set_feature_status('update_check', 'ok')
+        if not self.health_checks and not self.listeners:
+            self._set_feature_status('health', 'unavailable', 'no health_checks or listeners configured',
+                                     "set health_checks / listeners in config.json (see README)")
 
     def _collect_probes(self):
         """Collector (30s): re-run cheap availability/permission probes so a
@@ -1737,6 +1756,73 @@ class SentinelMonitor:
         except DockerError:
             return []
 
+    def _collect_health(self):
+        """Collector (30s): HTTP health per container name + TCP listeners.
+
+        Runs entirely on this thread with short timeouts, stdlib only
+        (urllib for HTTP, socket for TCP). Each entry resolves to one of:
+        'healthy' (expected status), 'down' (wrong status / refused /
+        timeout / malformed config), or 'unconfigured' (no check matches).
+        The per-container map is merged into the docker snapshot by
+        update_data(); listeners land under their own 'health' key.
+        """
+        import urllib.request
+        import urllib.error
+        checks = self.health_checks if isinstance(self.health_checks, dict) else {}
+        ports = self.listeners if isinstance(self.listeners, list) else []
+        per_container = {}
+        for name, spec in checks.items():
+            if not isinstance(spec, dict):
+                per_container[name] = {'state': 'down', 'detail': 'not a {url, expect} object'}
+                continue
+            url = spec.get('url', '')
+            try:
+                expect = int(spec.get('expect', 200))
+            except (TypeError, ValueError):
+                per_container[name] = {'state': 'down', 'detail': 'bad expect status'}
+                continue
+            if not isinstance(url, str) or not url.startswith(('http://', 'https://')):
+                per_container[name] = {'state': 'down', 'detail': 'bad url (need http:// or https://)'}
+                continue
+            try:
+                req = urllib.request.Request(url, headers={'User-Agent': f'sentinel/{VERSION}'})
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    status = resp.status
+            except (OSError, ValueError, urllib.error.URLError) as e:
+                per_container[name] = {'state': 'down', 'detail': str(e)[:60] or 'unreachable'}
+                continue
+            if status == expect:
+                per_container[name] = {'state': 'healthy', 'detail': f'{status}'}
+            else:
+                per_container[name] = {'state': 'down', 'detail': f'got {status}, want {expect}'}
+        listeners = {}
+        for port in ports:
+            try:
+                port = int(port)
+            except (TypeError, ValueError):
+                continue
+            key = str(port)
+            try:
+                with socket.create_connection(('127.0.0.1', port), timeout=3):
+                    listeners[key] = {'state': 'healthy', 'detail': 'open'}
+            except (OSError, OverflowError, ValueError) as e:
+                listeners[key] = {'state': 'down', 'detail': (str(e)[:60] or 'closed')}
+        healthy = sum(1 for v in per_container.values() if v['state'] == 'healthy')
+        down = sum(1 for v in per_container.values() if v['state'] == 'down')
+        healthy += sum(1 for v in listeners.values() if v['state'] == 'healthy')
+        down += sum(1 for v in listeners.values() if v['state'] == 'down')
+        if down:
+            self._set_feature_status('health', 'error', f'{down} check(s) down',
+                                     'curl the failing url / check the port is listening')
+        elif healthy:
+            self._set_feature_status('health', 'ok')
+        else:
+            self._set_feature_status('health', 'unavailable', 'no health_checks or listeners configured',
+                                     "set health_checks / listeners in config.json (see README)")
+        return {'containers': per_container, 'listeners': listeners,
+                'healthy': healthy, 'down': down}
+
+
     def get_kubernetes_info(self):
         """Latest Kubernetes info from the background collector (never blocks)."""
         result = self._collector_result('kubernetes')
@@ -2263,6 +2349,7 @@ class SentinelMonitor:
             ('WireGuard', 'wireguard'),
             ('Security Logs', 'security'),
             ('Proxy Logs', 'proxy'),
+            ('Service Health', 'health'),
             ('RAPL Energy', 'rapl'),
             ('Battery', 'battery'),
             ('Temperature', 'temperature'),
@@ -2481,11 +2568,13 @@ class SentinelMonitor:
             # Permission indicators after version
             perm_x = 16
             perm_icons = []
-            # D = Docker, K = K8s, W = WireGuard, S = Security, P = Proxy, R = RAPL
+            # D = Docker, K = K8s, W = WireGuard, S = Security, P = Proxy,
+            # R = RAPL, H = Service Health
             # Driven by the live feature_status registry: ok -> green,
             # no_permission/error -> red, anything else -> hidden.
             for char, key in (('D', 'docker'), ('K', 'kubernetes'), ('W', 'wireguard'),
-                              ('S', 'security'), ('P', 'proxy'), ('R', 'rapl')):
+                              ('S', 'security'), ('P', 'proxy'), ('R', 'rapl'),
+                              ('H', 'health')):
                 state = self.feature_status.get(key, {}).get('state', 'not_installed')
                 if state == 'ok':
                     perm_icons.append((char, 2))  # Green
@@ -2699,6 +2788,13 @@ class SentinelMonitor:
             'failed_logins': 0, 'successful_logins': 0, 'failed_ratio': 0.0,
             'top_ips': {}, 'top_users': {}, 'error_types': {},
             'recent_events': [], 'alerts': []}
+        health = self._collector_result('health')
+        if health:
+            per_container = health.get('containers', {})
+            for container in docker.get('containers', []):
+                entry = per_container.get(container.get('name'))
+                container['health'] = entry['state'] if entry else 'unconfigured'
+                container['health_detail'] = entry['detail'] if entry else ''
 
         self.cache = {
             'cpu': _timed('cpu', self.get_cpu_info),
@@ -2713,6 +2809,8 @@ class SentinelMonitor:
             'kubernetes': kubernetes,
             'proxy': proxy,
             'security': security,
+            'health': health or {'containers': {}, 'listeners': {},
+                                 'healthy': 0, 'down': 0},
         }
 
         self.last_update = current_time
@@ -2785,6 +2883,17 @@ class SentinelMonitor:
             stopped = docker.get('stopped', 0)
             if stopped > 0:
                 alerts.append(('DOCKER STOPPED', f"{stopped}", 'warning'))
+            for container in docker.get('containers', []):
+                if container.get('health') == 'down':
+                    alerts.append(('SERVICE DOWN',
+                                   f"{container.get('name')}: {container.get('health_detail', 'check failed')}",
+                                   'danger'))
+
+        # Listener alerts (ports that should be open but are not)
+        health = data.get('health', {})
+        for port, entry in health.get('listeners', {}).items():
+            if entry.get('state') == 'down':
+                alerts.append(('PORT CLOSED', f"{port}: {entry.get('detail', 'closed')}", 'danger'))
         
         # Kubernetes alerts
         k8s = data.get('kubernetes', {})
@@ -3497,6 +3606,19 @@ class SentinelMonitor:
                                     status_color = curses.color_pair(2) if container['status'] == 'running' else curses.color_pair(4)
                                     stdscr.addstr(py + line, px, f" {status_icon}", status_color)
                                     stdscr.addstr(py + line, px + 3, name, curses.color_pair(8))
+                                    # Health (v0.6.2): green dot for healthy,
+                                    # red cross for down. Stopped containers
+                                    # keep their status icon only.
+                                    health_mark = ''
+                                    health_pair = 8
+                                    if container.get('status') == 'running':
+                                        if container.get('health') == 'healthy':
+                                            health_mark, health_pair = ' ●', 2
+                                        elif container.get('health') == 'down':
+                                            health_mark, health_pair = ' ✗', 4
+                                    if health_mark and px + 3 + len(name) + len(health_mark) < px + pw:
+                                        stdscr.addstr(py + line, px + 3 + len(name), health_mark,
+                                                      curses.color_pair(health_pair))
                                     line += 1
                             
                             # Show K8s if available
@@ -3733,8 +3855,10 @@ def dump_snapshot(config):
             data = monitor.update_data()
             alerts = [{'name': name, 'value': value, 'severity': severity}
                       for name, value, severity in monitor.check_alerts(data)]
+            health = data.get('health', {}) or {}
         except Exception:  # noqa: BLE001 - probe must always emit JSON
             alerts = []
+            health = {}
         snapshot = {
             'sentinel_version': VERSION,
             'hostname': monitor.hostname,
@@ -3751,6 +3875,9 @@ def dump_snapshot(config):
             'k8s_available': k8s.get('available', False),
             'alert_count': len(alerts),
             'alerts': alerts[:5],
+            'health_healthy': health.get('healthy', 0),
+            'health_down': health.get('down', 0),
+            'health_listeners': health.get('listeners', {}),
         }
         print(json.dumps(snapshot))
     finally:
@@ -4014,10 +4141,18 @@ class FleetMonitor:
             snap, err = self._row_state(node)
             if snap is not None:
                 alert_n = snap.get('alert_count', 0)
-                if alert_n > 0:
-                    state = f"{alert_n} alert{'s' if alert_n != 1 else ''}"
+                health_down = snap.get('health_down', 0)
+                health_healthy = snap.get('health_healthy', 0)
+                if health_down > 0:
+                    health_mark = f" ✗{health_down}"
+                elif health_healthy > 0:
+                    health_mark = f" ●{health_healthy}"
                 else:
-                    state = 'ok'
+                    health_mark = ''
+                if alert_n > 0:
+                    state = f"{alert_n} alert{'s' if alert_n != 1 else ''}{health_mark}"
+                else:
+                    state = ('ok' + health_mark) if health_mark else 'ok'
                 line = cols.format(
                     node['name'][:16],
                     f"{snap.get('cpu_percent', 0.0):.0f}",
@@ -4029,7 +4164,7 @@ class FleetMonitor:
                      f"{snap.get('containers_total', 0)}"),
                     str(snap.get('pods_running', 0)),
                     state)[:w]
-                color = (curses.color_pair(4) if alert_n > 0
+                color = (curses.color_pair(4) if (alert_n > 0 or health_down > 0)
                          else curses.color_pair(2))
             elif err is not None:
                 line = cols.format(node['name'][:16], '-', '-', '-',

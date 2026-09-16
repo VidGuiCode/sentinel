@@ -231,9 +231,21 @@ Create config with `sentinel --init-config`:
     "suspicious_ip_threshold": 10,
     "error_rate_threshold": 10,
     "error_rate_window": 60
-  }
+  },
+  "health_checks": {
+    "nginx-proxy": {"url": "http://localhost:80", "expect": 200},
+    "nextcloud": {"url": "http://localhost:8080/login", "expect": 200}
+  },
+  "listeners": [22, 80, 443]
 }
 ```
+
+A container can be "running" while the app inside has crashed, so a green
+`●` (healthy) or red `✗` (down) is shown next to each running container name
+in the Docker panel. Listener ports that fail to connect raise a `PORT
+CLOSED` alert; containers whose check fails raise `SERVICE DOWN`. Both also
+appear in `sentinel --dump` (`health_healthy`, `health_down`,
+`health_listeners`) and in the fleet table.
 
 ### Systemd Service
 

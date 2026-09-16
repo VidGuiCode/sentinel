@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased - v0.6.2 service health checks (in progress)
+
+Container "running" is not service "healthy". New `health_checks`
+(per-container HTTP url + expected status) and `listeners` (TCP ports that
+must accept) config, checked on a 30s background collector with stdlib only
+(`urllib`, `socket`). The Docker panel shows a green `●` for healthy and a
+red `✗` for down next to each running container; failures raise `SERVICE
+DOWN` / `PORT CLOSED` alerts, surface in the diagnostics overlay (`d`,
+`H` header letter), and flow into `sentinel --dump` and the fleet table.
+
 ## v0.6.1 - multi-host fleet over SSH
 
 No agent, no daemon, no new dependency: `sentinel --host hosts.json` shows
