@@ -141,7 +141,7 @@ sentinel --help               # Show options
 
 ### Fleet Mode (`--host`)
 
-One screen for the whole homelab — no agent, just SSH + `python3` on each node:
+One screen for the whole homelab - no agent, just SSH + `python3` on each node:
 
 ```json
 {
@@ -283,7 +283,7 @@ Measured numbers: [PERFORMANCE.md](PERFORMANCE.md).
 ### v0.6.1
 - **Fleet mode (`--host`)** - one table for the whole homelab over plain SSH:
   per-host CPU/RAM/load/uptime/containers/pods/alerts, `Enter` to SSH in,
-  `r` to refresh in parallel. No agent — the probe is `sentinel --dump`
+  `r` to refresh in parallel. No agent - the probe is `sentinel --dump`
   (one JSON line) on the remote side.
 
 ### v0.6.0

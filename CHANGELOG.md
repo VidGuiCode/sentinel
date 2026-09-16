@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.6.1 — multi-host fleet over SSH
+## v0.6.1 - multi-host fleet over SSH
 
 No agent, no daemon, no new dependency: `sentinel --host hosts.json` shows
 one table for the whole homelab (name, CPU%, MEM%, load, uptime, containers,
