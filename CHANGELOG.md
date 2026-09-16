@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.6.1 — multi-host fleet over SSH
+
+No agent, no daemon, no new dependency: `sentinel --host hosts.json` shows
+one table for the whole homelab (name, CPU%, MEM%, load, uptime, containers,
+pods, alerts per host). `j/k` + arrows move, `Enter` SSHes into the selected
+host and launches Sentinel there, `r` re-probes all hosts in parallel, `q`
+quits. Unreachable hosts stay visible with the reason (`timeout`, `Permission
+denied (publickey)`, ...) instead of silently disappearing.
+
+The probe each host runs is `python3 sentinel-monitor.py --dump`: one JSON
+line reusing the same readers as the TUI, so the fleet table and the local
+dashboard can never disagree. The remote side needs nothing but `python3`
+and this file. Probes run on one daemon thread per host with a 15s timeout,
+argv-list `ssh` only (hostnames from a user-edited JSON file are never passed
+to a shell), and `BatchMode=yes` so a password prompt can never hang the
+table.
+
 ## v0.6.0 — performance, resilience, and honest failure reporting
 
 The theme of this release: **the host should not notice Sentinel is running,

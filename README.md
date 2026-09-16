@@ -135,8 +135,33 @@ sentinel --theme nord         # Use Nord theme
 sentinel --service            # Headless service mode
 sentinel --init-config        # Create config file
 sentinel --light              # Lightweight mode (low-end VMs, Pi3)
+sentinel --host hosts.json    # Fleet overview of many hosts over SSH
 sentinel --help               # Show options
 ```
+
+### Fleet Mode (`--host`)
+
+One screen for the whole homelab — no agent, just SSH + `python3` on each node:
+
+```json
+{
+  "nodes": [
+    {"name": "pi4", "host": "192.168.1.10", "user": "pi", "port": 22},
+    {"name": "vps-ams", "host": "vps.example.com", "user": "root"},
+    {"name": "homelab", "host": "10.0.0.5", "user": "admin", "key": "~/.ssh/homelab"}
+  ]
+}
+```
+
+```bash
+# copy this same file to each host first, then:
+sentinel --host sentinel-hosts.json
+```
+
+Each row shows CPU%, MEM%, load, uptime, containers, pods and alert count.
+`j`/`k` to move, `Enter` to SSH into that host and launch Sentinel there,
+`r` to re-probe all hosts in parallel, `q` to quit. Dark hosts show *why*
+(timeout, auth failure, missing file) instead of vanishing.
 
 ### Keyboard Controls
 
@@ -254,6 +279,12 @@ sentinel
 
 Full detail with rationale for each change: [CHANGELOG.md](CHANGELOG.md).
 Measured numbers: [PERFORMANCE.md](PERFORMANCE.md).
+
+### v0.6.1
+- **Fleet mode (`--host`)** - one table for the whole homelab over plain SSH:
+  per-host CPU/RAM/load/uptime/containers/pods/alerts, `Enter` to SSH in,
+  `r` to refresh in parallel. No agent — the probe is `sentinel --dump`
+  (one JSON line) on the remote side.
 
 ### v0.6.0
 - **Non-blocking UI** - slow collectors (Docker, Kubernetes, logs, network

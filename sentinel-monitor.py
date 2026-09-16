@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Sentinel v0.4 - Universal Linux System Monitor
+Sentinel - Universal Linux System Monitor
 A beautiful, real-time single-screen TUI dashboard for homelab monitoring
 
 Features:
@@ -50,7 +50,7 @@ from datetime import datetime, timedelta
 from collections import deque
 from pathlib import Path
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 
 # Profiling instrumentation (active only when SENTINEL_PROFILE is set to a path)
 _PROFILE_PATH = os.environ.get('SENTINEL_PROFILE')
@@ -3661,6 +3661,422 @@ class SentinelMonitor:
                     f.write(f"{datetime.now()}: {e}\n")
 
 
+def dump_snapshot(config):
+    """Print one JSON status line and exit (--dump).
+
+    This is the machine-readable probe the fleet mode (``--host``) runs on
+    every remote node over SSH: the remote side needs nothing but ``python3``
+    and this single file. It intentionally reuses the same readers as the TUI
+    (``SentinelMonitor``) so the fleet table and the local dashboard can never
+    disagree on what a metric means.
+
+    The snapshot uses only fast synchronous reads (/proc, /sys, statvfs,
+    Unix-socket Docker API): no collectors are started, no network lookups
+    are made, and --dump never spawns a thread, so it stays cheap enough to
+    run every fleet refresh cycle.
+    """
+    monitor = SentinelMonitor(config=config, service_mode=True)
+    try:
+        # Only the smallest synchronous readers run here (cpu/mem/uptime).
+        # Everything else (disk statvfs, network sysfs, collectors) is either
+        # optional or OS-gated below: --dump must emit JSON even on a
+        # degraded/foreign host, never traceback.
+        try:
+            cpu = monitor.get_cpu_info()
+        except Exception:  # noqa: BLE001 -- probe must always emit JSON
+            cpu = {'usage': 0.0, 'load': [0.0, 0.0, 0.0]}
+        try:
+            mem = monitor.get_memory_info()
+        except Exception:  # noqa: BLE001 -- probe must always emit JSON
+            mem = {'percent': 0.0}
+        # Docker/K8s go through argv-list subprocess-free paths where
+        # possible; the collectors are NOT started here.
+        try:
+            docker_data = DockerClient(timeout=5).containers()
+            docker = {'available': True, **docker_data}
+        except DockerError as e:
+            docker = {'available': False, 'running': 0, 'stopped': 0,
+                      'total': 0, 'error': e.state, 'detail': e.detail}
+        except Exception as e:  # defensive: --dump must always emit JSON
+            docker = {'available': False, 'running': 0, 'stopped': 0,
+                      'total': 0, 'error': 'error', 'detail': str(e)}
+        k8s = {'available': False, 'pods_running': 0, 'pods_pending': 0,
+               'pods_failed': 0}
+        kubectl_path = shutil.which('kubectl')
+        if kubectl_path is not None:
+            try:
+                out = subprocess.run(
+                    [kubectl_path, 'get', 'pods', '-A', '--no-headers'],
+                    shell=False, stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, text=True,
+                    timeout=10).stdout.strip()
+                if out:
+                    k8s['available'] = True
+                    for line in out.split('\n'):
+                        parts = line.split()
+                        if len(parts) < 4:
+                            continue
+                        status = parts[3]
+                        if status == 'Running':
+                            k8s['pods_running'] += 1
+                        elif status == 'Pending':
+                            k8s['pods_pending'] += 1
+                        elif status in ('Failed', 'Error', 'CrashLoopBackOff'):
+                            k8s['pods_failed'] += 1
+            except (OSError, subprocess.SubprocessError, ValueError):
+                pass
+        try:
+            days, hours, mins = monitor.get_uptime()
+        except Exception:  # noqa: BLE001 -- probe must always emit JSON
+            days, hours, mins = 0, 0, 0
+        try:
+            data = monitor.update_data()
+            alerts = [{'name': name, 'value': value, 'severity': severity}
+                      for name, value, severity in monitor.check_alerts(data)]
+        except Exception:  # noqa: BLE001 -- probe must always emit JSON
+            alerts = []
+        snapshot = {
+            'sentinel_version': VERSION,
+            'hostname': monitor.hostname,
+            'cpu_percent': round(cpu.get('usage', 0.0), 1),
+            'mem_percent': round(mem.get('percent', 0.0), 1),
+            'load': cpu.get('load', [0.0, 0.0, 0.0]),
+            'uptime': f"{days}d {hours}h {mins}m",
+            'containers_running': docker.get('running', 0),
+            'containers_total': docker.get('total', 0),
+            'docker_available': docker.get('available', False),
+            'pods_running': k8s.get('pods_running', 0),
+            'pods_pending': k8s.get('pods_pending', 0),
+            'pods_failed': k8s.get('pods_failed', 0),
+            'k8s_available': k8s.get('available', False),
+            'alert_count': len(alerts),
+            'alerts': alerts[:5],
+        }
+        print(json.dumps(snapshot))
+    finally:
+        monitor.stop_collectors()
+
+
+# ---------------------------------------------------------------------------
+# Fleet mode (v0.6.1): one-screen overview of many hosts over plain SSH.
+#
+# Design notes (why it looks like this):
+# - No agent, no daemon, no new dependency: the probe command is
+#   `python3 <sentinel-path> --dump`, which prints one JSON line. The remote
+#   side needs nothing but python3 and this file (single-file philosophy).
+# - `ssh` stays an argv-list subprocess (never shell=True): hostnames come
+#   from a user-edited JSON file and must not be interpretable as shell.
+# - Refresh is parallel threads (one per host, 15s timeout) so one dead host
+#   cannot stall the table; results publish into a lock-guarded dict and the
+#   curses loop only ever reads the latest snapshot.
+# ---------------------------------------------------------------------------
+
+FLEET_PROBE_TIMEOUT = 15
+
+
+def load_hosts_file(path):
+    """Load and validate a fleet hosts file.
+
+    Accepts either {"nodes": [...]} or a bare [...] list. Each node needs at
+    least a "host" (or "name", used as the SSH target when "host" is absent);
+    "name", "user", "port" and "key" are optional. Returns (nodes, error):
+    nodes is a list of normalized dicts, error is None on success.
+
+    Malformed entries are skipped, never fatal: one bad line must not hide
+    the rest of the fleet.
+    """
+    try:
+        with open(os.path.expanduser(path), 'r') as f:
+            raw = json.load(f)
+    except OSError as e:
+        return [], f"cannot read {path}: {e}"
+    except ValueError as e:
+        return [], f"{path}: invalid JSON: {e}"
+    entries = raw.get('nodes') if isinstance(raw, dict) else raw
+    if not isinstance(entries, list):
+        return [], (f"{path}: expected {{\"nodes\": [...]}} "
+                     "or a bare [...] list")
+    nodes = []
+    for i, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        target = entry.get('host') or entry.get('name')
+        if not target:
+            continue
+        try:
+            port = int(entry.get('port', 22))
+        except (TypeError, ValueError):
+            continue
+        nodes.append({
+            'name': str(entry.get('name') or target),
+            'host': str(target),
+            'user': str(entry.get('user') or ''),
+            'port': port,
+            'key': str(entry.get('key') or ''),
+            'index': i,
+        })
+    if not nodes:
+        return [], f"{path}: no usable nodes (each needs a host or name)"
+    return nodes, None
+
+
+def fleet_probe_host(node, sentinel_path, timeout=FLEET_PROBE_TIMEOUT):
+    """SSH to one node and return its --dump snapshot dict.
+
+    Never raises: every failure mode (timeout, auth, missing python3, bad
+    JSON) is reported as {'ok': False, 'error': ...} so the table can show
+    *why* a host is dark instead of just hiding it.
+    """
+    target = node['host']
+    if node['user']:
+        target = f"{node['user']}@{target}"
+    argv = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
+            '-p', str(node['port'])]
+    if node['key']:
+        argv += ['-i', os.path.expanduser(node['key'])]
+    argv += [target, 'python3', sentinel_path, '--dump']
+    try:
+        proc = subprocess.run(
+            argv, shell=False, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {'ok': False, 'error': f'timeout after {timeout}s'}
+    except OSError as e:
+        if 'ssh' in str(e).lower() or isinstance(e, FileNotFoundError):
+            return {'ok': False, 'error': 'ssh binary not found in PATH'}
+        return {'ok': False, 'error': f'cannot spawn ssh: {e}'}
+    if proc.returncode != 0:
+        err = (proc.stderr or '').strip().split('\n')
+        detail = err[-1][:100] if err and err[-1] else f'exit {proc.returncode}'
+        return {'ok': False, 'error': detail}
+    try:
+        data = json.loads((proc.stdout or '').strip().split('\n')[-1])
+    except (ValueError, IndexError) as e:
+        return {'ok': False, 'error': f'bad probe JSON: {e}'}
+    if not isinstance(data, dict):
+        return {'ok': False, 'error': 'bad probe JSON: not an object'}
+    data['ok'] = True
+    return data
+
+
+class FleetMonitor:
+    """Fleet overview TUI: parallel SSH snapshots, one selectable table."""
+
+    def __init__(self, config=None, nodes=None, hosts_path='',
+                 sentinel_path='sentinel-monitor.py'):
+        self.config = config or load_config()
+        self.nodes = nodes or []
+        self.hosts_path = hosts_path
+        # Remote python path: how the remote shell finds this same file.
+        self.sentinel_path = sentinel_path
+        self.theme_name = self.config.get('theme', 'default')
+        self.results = {}   # node name -> snapshot dict
+        self.errors = {}    # node name -> error string (unreachable detail)
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self.selected = 0
+        self.last_refresh = 0.0
+        self.refreshing = False
+
+    def refresh(self, force=False):
+        """Re-probe all hosts in parallel (daemon threads, one per host).
+
+        force=True bypasses the 30s minimum interval (the `r` key). Threads
+        are daemonic with a hard SSH timeout, so a dead host delays its own
+        row, never the table and never process exit.
+        """
+        now = time.time()
+        if not force and now - self.last_refresh < 30:
+            return
+        self.last_refresh = now
+        self.refreshing = True
+
+        def _probe(node):
+            snap = fleet_probe_host(node, self.sentinel_path)
+            with self._lock:
+                if snap.get('ok'):
+                    self.results[node['name']] = snap
+                    self.errors.pop(node['name'], None)
+                else:
+                    self.errors[node['name']] = snap.get('error', 'unknown')
+                if len(self.results) + len(self.errors) >= len(self.nodes):
+                    self.refreshing = False
+
+        for node in self.nodes:
+            threading.Thread(target=_probe, args=(node,),
+                             name=f'sentinel-fleet-{node["name"]}',
+                             daemon=True).start()
+
+    def _row_state(self, node):
+        """(snapshot-or-None, error-or-None) for one node."""
+        with self._lock:
+            return (self.results.get(node['name']),
+                    self.errors.get(node['name']))
+
+    def draw(self, stdscr):
+        """Fleet table main loop. j/k/arrows move, r refreshes, Enter SSHes
+        into the selected host, q quits."""
+        curses.curs_set(0)
+        self.setup_colors()
+        self.refresh(force=True)
+        while True:
+            try:
+                h, w = stdscr.getmaxyx()
+                stdscr.erase()
+                self._draw_table(stdscr, h, w)
+                stdscr.refresh()
+                stdscr.timeout(1000)
+                key = stdscr.getch()
+                if key in (ord('q'), ord('Q')):
+                    break
+                elif key in (ord('r'), ord('R')):
+                    self.refresh(force=True)
+                elif key in (curses.KEY_DOWN, ord('j'), ord('J')):
+                    self.selected = min(len(self.nodes) - 1, self.selected + 1)
+                elif key in (curses.KEY_UP, ord('k'), ord('K')):
+                    self.selected = max(0, self.selected - 1)
+                elif key in (curses.KEY_ENTER, 10, 13):
+                    self._ssh_into_selected(stdscr)
+                elif key == curses.KEY_RESIZE:
+                    pass
+            except curses.error:
+                pass
+            except Exception as e:
+                with open('/tmp/sentinel.log', 'a') as f:
+                    f.write(f"{datetime.now()}: fleet: {e}\n")
+
+    def _ssh_into_selected(self, stdscr):
+        """Suspend curses, exec interactive ssh with the local terminal, then
+        resume. The remote command launches Sentinel there when present and
+        falls back to a plain shell otherwise."""
+        if not self.nodes:
+            return
+        node = self.nodes[self.selected]
+        target = node['host']
+        if node['user']:
+            target = f"{node['user']}@{target}"
+        remote_cmd = (
+            f"if [ -f {shlex.quote(self.sentinel_path)} ]; then "
+            f"python3 {shlex.quote(self.sentinel_path)}; else "
+            f"echo 'sentinel not found at {self.sentinel_path}, "
+            "dropping to shell'; exec $SHELL -l; fi")
+        argv = ['ssh', '-p', str(node['port'])]
+        if node['key']:
+            argv += ['-i', os.path.expanduser(node['key'])]
+        argv += ['-t', target, remote_cmd]
+        curses.endwin()
+        try:
+            subprocess.run(argv)
+        except OSError:
+            pass
+        finally:
+            stdscr.refresh()
+
+    def setup_colors(self):
+        theme = THEMES.get(self.theme_name, THEMES['default'])
+        curses.start_color()
+        curses.use_default_colors()
+        curses.init_pair(1, theme['primary'], -1)
+        curses.init_pair(2, theme['success'], -1)
+        curses.init_pair(3, theme['warning'], -1)
+        curses.init_pair(4, theme['danger'], -1)
+        curses.init_pair(7, theme['text'], -1)
+        curses.init_pair(8, theme['muted'], -1)
+
+    def _draw_table(self, stdscr, h, w):
+        # Header
+        try:
+            stdscr.addstr(0, 1, 'sentinel', curses.color_pair(1) | curses.A_BOLD)
+            stdscr.addstr(0, 10, f"v{VERSION}", curses.color_pair(8))
+            title = f"fleet: {self.hosts_path} ({len(self.nodes)} hosts)"
+            stdscr.addstr(0, 20, title[:max(0, w - 32)],
+                          curses.color_pair(7) | curses.A_BOLD)
+            if self.refreshing:
+                stdscr.addstr(0, w - 15, 'refreshing...', curses.color_pair(3))
+            else:
+                ts = datetime.now().strftime('%H:%M:%S')
+                stdscr.addstr(0, w - len(ts) - 1, ts, curses.color_pair(8))
+        except curses.error:
+            pass
+        # Column header
+        cols = '  {:<16} {:>5} {:>5} {:>14} {:>10} {:>6} {:>4}  {}'
+        try:
+            stdscr.addstr(2, 0, cols.format(
+                'HOST', 'CPU%', 'MEM%', 'LOAD', 'UPTIME', 'CTNRS',
+                'PODS', 'ALERTS / STATUS')[:w], curses.color_pair(8))
+        except curses.error:
+            pass
+        # Rows
+        for i, node in enumerate(self.nodes):
+            y = 3 + i
+            if y >= h - 2:
+                break
+            snap, err = self._row_state(node)
+            if snap is not None:
+                alert_n = snap.get('alert_count', 0)
+                if alert_n > 0:
+                    state = f"{alert_n} alert{'s' if alert_n != 1 else ''}"
+                else:
+                    state = 'ok'
+                line = cols.format(
+                    node['name'][:16],
+                    f"{snap.get('cpu_percent', 0.0):.0f}",
+                    f"{snap.get('mem_percent', 0.0):.0f}",
+                    ','.join(f"{v:.2f}" for v in
+                              (snap.get('load') or [0, 0, 0])[:3]),
+                    snap.get('uptime', '?')[:10],
+                    (f"{snap.get('containers_running', 0)}/"
+                     f"{snap.get('containers_total', 0)}"),
+                    str(snap.get('pods_running', 0)),
+                    state)[:w]
+                color = (curses.color_pair(4) if alert_n > 0
+                         else curses.color_pair(2))
+            elif err is not None:
+                line = cols.format(node['name'][:16], '-', '-', '-',
+                                   '-', '-', '-', f'ERR: {err}'[:40])[:w]
+                color = curses.color_pair(4)
+            else:
+                line = cols.format(node['name'][:16], '?', '?', '?', '?',
+                                   '?', '?', 'probing...')[:w]
+                color = curses.color_pair(8)
+            try:
+                attr = color | curses.A_REVERSE if i == self.selected else color
+                stdscr.addstr(y, 0, line.ljust(max(0, w - 1))[:max(0, w - 1)],
+                              attr)
+            except curses.error:
+                pass
+        # Footer
+        try:
+            footer = ('j/k select  Enter ssh  r refresh  q quit'
+                      + ('  |  remote: ' + self.sentinel_path
+                         if w > 90 else ''))
+            stdscr.addstr(h - 1, 1, footer[:w - 2], curses.color_pair(8))
+        except curses.error:
+            pass
+
+
+def run_fleet_mode(config, hosts_path, sentinel_path):
+    """Entry point for --host: validate the hosts file, then run the table."""
+    nodes, error = load_hosts_file(hosts_path)
+    if error is not None:
+        print(f"Error: {error}")
+        return
+    if shutil.which('ssh') is None:
+        print("Error: ssh binary not found in PATH "
+              "(fleet mode shells out to OpenSSH).")
+        return
+    print(f"Sentinel v{VERSION} - Fleet Mode ({len(nodes)} hosts)")
+    print(f"Hosts file: {hosts_path}")
+    print("Probing hosts (15s timeout each, in parallel)...")
+    fleet = FleetMonitor(config=config, nodes=nodes,
+                         hosts_path=hosts_path,
+                         sentinel_path=sentinel_path)
+    try:
+        curses.wrapper(fleet.draw)
+    except KeyboardInterrupt:
+        pass
+
+
 def run_service_mode(config):
     """Run in headless service mode - logs to file/stdout."""
     import signal
@@ -3739,6 +4155,13 @@ Examples:
   sentinel --light             # Lightweight mode (low-end VMs, Pi3)
   sentinel --service          # Run in headless service mode
   sentinel --init-config      # Create default config file
+  sentinel --dump             # Print one JSON status line (fleet probe)
+  sentinel --host hosts.json  # Fleet overview of many hosts over SSH
+
+Fleet hosts file (--host): {"nodes": [{"name": "pi4", "host": "192.168.1.10",
+  "user": "pi", "port": 22, "key": "~/.ssh/id_rsa"}]}. Each node needs this
+same file at --sentinel-path on the remote side (default: the same relative
+path used locally, i.e. copy sentinel-monitor.py there first).
 
 Themes: default, nord, dracula, gruvbox, monokai
 
@@ -3760,6 +4183,16 @@ Config file locations (in order of priority):
                         help='Path to config file')
     parser.add_argument('--light', action='store_true',
                         help='Lightweight mode: smaller history, slower refresh, less data (good for low-end VMs)')
+    parser.add_argument('--dump', action='store_true',
+                        help='Print one JSON status line to stdout and exit '
+                             '(machine-readable probe used by --host fleet mode)')
+    parser.add_argument('--host', type=str, metavar='HOSTS_FILE',
+                        help='Fleet mode: overview of many hosts over SSH '
+                             '(JSON file with {"nodes": [{"name", "host", "user", "port", "key"}]})')
+    parser.add_argument('--sentinel-path', type=str,
+                        default='sentinel-monitor.py',
+                        help='Remote path of sentinel-monitor.py on fleet hosts '
+                             '(default: sentinel-monitor.py)')
     
     args = parser.parse_args()
     
@@ -3793,8 +4226,13 @@ Config file locations (in order of priority):
             print(f"Error loading config: {e}")
             return
     
-    # Run in appropriate mode
-    if args.service:
+    # Run in appropriate mode (--dump/--host first: fleet plumbing must work
+    # even where curses is missing or /proc is absent, e.g. probe targets)
+    if args.dump:
+        dump_snapshot(config)
+    elif args.host:
+        run_fleet_mode(config, args.host, args.sentinel_path)
+    elif args.service:
         run_service_mode(config)
     else:
         monitor = None
