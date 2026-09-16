@@ -4,7 +4,7 @@
 # low-end hardware profiles inside Docker containers.
 #
 # Results are written container-local (/results) and copied out with
-# `docker cp` after each run -- nothing is written into the (possibly
+# `docker cp` after each run - nothing is written into the (possibly
 # cloud-synced) repo mount while containers run, which avoids transient
 # share errors on Windows/Docker Desktop.
 #
@@ -20,7 +20,7 @@ IMAGE=sentinel-bench
 DURATION=${DURATION:-30}
 # Which sentinel source file to measure. Point this at a checkout of an older
 # revision to produce before/after numbers in the same session, under the same
-# host load -- results from different sessions are not comparable.
+# host load - results from different sessions are not comparable.
 SENTINEL_SCRIPT=${SENTINEL_SCRIPT:-sentinel-monitor.py}
 TOOLS=${TOOLS:-"sentinel-tui sentinel-service btop htop"}
 SUBDIR=${1:-baseline}

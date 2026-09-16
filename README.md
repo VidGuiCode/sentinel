@@ -245,7 +245,7 @@ journalctl -u sentinel -f
 
 ## Requirements
 
-- Python 3.6+ (standard library only — no pip packages)
+- Python 3.6+ (standard library only - no pip packages)
 - Linux kernel 4.0+
 - Architectures: x86_64, aarch64, armv7 (ARM verified under QEMU emulation)
 - Optional, for the features that use them: `docker` (read access to
@@ -253,7 +253,7 @@ journalctl -u sentinel -f
   lm-sensors
 
 Anything missing or unreadable is reported in the diagnostics overlay (`d`)
-with the command to fix it — Sentinel degrades rather than failing.
+with the command to fix it - Sentinel degrades rather than failing.
 
 > On Raspberry Pi and other low-memory hosts, run with `--light`.
 > See [PERFORMANCE.md](PERFORMANCE.md) for measured numbers.

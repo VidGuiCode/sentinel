@@ -8,7 +8,7 @@
 set -e
 
 # The version is read from the binary that actually gets installed, never
-# hardcoded here -- a literal in this script silently goes stale every release
+# hardcoded here - a literal in this script silently goes stale every release
 # and then reports the wrong version at the end of a successful install.
 VERSION=""
 

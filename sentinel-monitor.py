@@ -399,7 +399,7 @@ class DockerClient:
         return cpu_pct, mem_pct
 
     def disk_usage_volumes(self):
-        """Volume sizes in the disk-panel shape; degrades to '—' when the
+        """Volume sizes in the disk-panel shape; degrades to '-' when the
         daemon does not report SizeBytes (no per-volume shell fallback).
 
         Verbose df can take several seconds on hosts with many images, so it
@@ -419,7 +419,7 @@ class DockerClient:
             name = (v.get('Name') or '')[:14]
             if not name:
                 continue
-            size = '—'
+            size = '-'
             usage = v.get('UsageData') or {}
             size_bytes = usage.get('SizeBytes', -1)
             if isinstance(size_bytes, int) and size_bytes >= 0:
@@ -3142,7 +3142,7 @@ class SentinelMonitor:
                             if disk_type == 'docker':
                                 # Docker volumes - show with docker prefix, name and size
                                 mount = disk['mount'][:dw - 14]
-                                size_text = disk['used'][:8] if disk['used'] else '—'
+                                size_text = disk['used'][:8] if disk['used'] else '-'
                                 stdscr.addstr(dy + i, dx, "dk:", curses.color_pair(5))
                                 stdscr.addstr(dy + i, dx + 3, mount, curses.color_pair(8))
                                 stdscr.addstr(dy + i, dx + dw - len(size_text), size_text, curses.color_pair(7))
@@ -3196,7 +3196,7 @@ class SentinelMonitor:
                         line = 0
                         
                         # Interface and connection type
-                        iface = net['interface'] or "—"
+                        iface = net['interface'] or "-"
                         conn_type = net.get('connection_type', '')
                         stdscr.addstr(ny + line, nx, iface, curses.color_pair(1) | curses.A_BOLD)
                         if conn_type:
@@ -3214,7 +3214,7 @@ class SentinelMonitor:
                         
                         # IPs
                         if line < nh:
-                            local_ip = net['local_ip'] or "—"
+                            local_ip = net['local_ip'] or "-"
                             stdscr.addstr(ny + line, nx, local_ip, curses.color_pair(7))
                             public_ip = net['public_ip'] or "N/A"
                             if nw > 20:
@@ -3270,7 +3270,7 @@ class SentinelMonitor:
                             if line >= nh:
                                 break
                             # Get full IP (without port), limit to available width
-                            endpoint_full = peer['endpoint'].split(':')[0] if peer.get('endpoint') else "—"
+                            endpoint_full = peer['endpoint'].split(':')[0] if peer.get('endpoint') else "-"
                             max_ip_len = nw - 4  # Leave room for status icon
                             endpoint = endpoint_full[:max_ip_len]
                             status = "●" if peer['connected'] else "○"
@@ -3394,7 +3394,7 @@ class SentinelMonitor:
                             # Health and cycles
                             if line < ph and battery.get('health'):
                                 health = battery['health']
-                                cycles = battery.get('cycle_count') or '—'
+                                cycles = battery.get('cycle_count') or '-'
                                 health_color = curses.color_pair(2) if health > 80 else curses.color_pair(3) if health > 60 else curses.color_pair(4)
                                 stdscr.addstr(py + line, px, f"health:", curses.color_pair(8))
                                 stdscr.addstr(py + line, px + 7, f"{health:.0f}%", health_color)
@@ -3683,11 +3683,11 @@ def dump_snapshot(config):
         # degraded/foreign host, never traceback.
         try:
             cpu = monitor.get_cpu_info()
-        except Exception:  # noqa: BLE001 -- probe must always emit JSON
+        except Exception:  # noqa: BLE001 - probe must always emit JSON
             cpu = {'usage': 0.0, 'load': [0.0, 0.0, 0.0]}
         try:
             mem = monitor.get_memory_info()
-        except Exception:  # noqa: BLE001 -- probe must always emit JSON
+        except Exception:  # noqa: BLE001 - probe must always emit JSON
             mem = {'percent': 0.0}
         # Docker/K8s go through argv-list subprocess-free paths where
         # possible; the collectors are NOT started here.
@@ -3727,13 +3727,13 @@ def dump_snapshot(config):
                 pass
         try:
             days, hours, mins = monitor.get_uptime()
-        except Exception:  # noqa: BLE001 -- probe must always emit JSON
+        except Exception:  # noqa: BLE001 - probe must always emit JSON
             days, hours, mins = 0, 0, 0
         try:
             data = monitor.update_data()
             alerts = [{'name': name, 'value': value, 'severity': severity}
                       for name, value, severity in monitor.check_alerts(data)]
-        except Exception:  # noqa: BLE001 -- probe must always emit JSON
+        except Exception:  # noqa: BLE001 - probe must always emit JSON
             alerts = []
         snapshot = {
             'sentinel_version': VERSION,

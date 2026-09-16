@@ -2,7 +2,7 @@
 #
 # Built with `docker build --platform linux/arm64` (or linux/arm/v7) and run
 # under QEMU user-mode emulation via binfmt_misc. This validates that Sentinel
-# *runs* on ARM -- imports, /proc and /sys parsing, curses rendering, both
+# *runs* on ARM - imports, /proc and /sys parsing, curses rendering, both
 # entry-point modes. It says nothing about ARM performance: QEMU emulates
 # instructions at a large and uneven slowdown, so timing numbers from this
 # image are meaningless.

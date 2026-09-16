@@ -11,7 +11,7 @@ Sampling every 0.5s:
   - /proc/<pid>/stat   (utime+stime -> % of one core)
   - /proc/<pid>/status (VmRSS, voluntary/nonvoluntary ctxt switches)
   - container cgroup CPU (v2: /sys/fs/cgroup/cpu.stat usage_usec/nr_throttled/
-    throttled_usec; v1 fallback: /sys/fs/cgroup/cpuacct.usage) -- captures
+    throttled_usec; v1 fallback: /sys/fs/cgroup/cpuacct.usage) - captures
     short-lived subprocess children that per-pid sampling misses.
 
 The first 2 samples are discarded (startup transient).

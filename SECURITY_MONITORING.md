@@ -207,7 +207,7 @@ Footer: [BRUTE FORCE Possible brute force from 192.168.1.100 (23 attempts)]
 - **Background collector:** Log parsing runs on its own thread every 5
   seconds; the render loop never waits on it (v0.6)
 - **Limited parsing:** Last 1000 lines per check (200 in light mode), read
-  directly with `deque(maxlen=N)` — no `tail` subprocess
+  directly with `deque(maxlen=N)` - no `tail` subprocess
 - **Windowed cleanup:** Automatic removal of old events, so memory stays flat
   under sustained attack
 - **Efficient regex:** Pre-compiled patterns

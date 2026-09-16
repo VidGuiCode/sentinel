@@ -2,7 +2,7 @@
 #
 # The source is COPYed in rather than bind-mounted: Docker Desktop for Windows
 # serves bind mounts over a filesystem that returns EINVAL from getdents when
-# the process runs as a non-root uid or with dropped capabilities -- which is
+# the process runs as a non-root uid or with dropped capabilities - which is
 # exactly what these scenarios do. Baking the files in keeps the test about
 # Sentinel's behaviour instead of the host's mount driver.
 FROM sentinel-bench

@@ -8,7 +8,7 @@ look like a pass.
 
 This allocates a pty with an explicit size, runs the target, drains output for
 a few seconds, and replays the ANSI stream into a plain-text grid so the final
-visible frame can be asserted on -- used both for render smoke tests and for
+visible frame can be asserted on - used both for render smoke tests and for
 verifying that permission-degraded panels show an explanation instead of going
 blank.
 
