@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Summarize bench results: read all *.json in a results dir and print a
-markdown comparison table (tool x profile: CPU%, cgroup CPU%, RSS MB, ctx/s).
+markdown table (tool by profile: CPU%, cgroup CPU%, RSS MB, changes/s).
 
 Usage: python3 bench/summarize.py bench/results/baseline
 """
@@ -30,7 +30,7 @@ def main():
             continue
         name = r.get('name', os.path.basename(path)[:-5])
         profile, _, run = name.partition('-')
-        # run names contain a dash (sentinel-tui); split on first dash only
+        # Run names hold a dash (sentinel-tui). Split at the first dash only
         rows.append((profile, run, r))
 
     rows.sort(key=lambda x: (

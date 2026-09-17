@@ -1,33 +1,45 @@
 # Sentinel Performance
 
-Sentinel targets low-end servers, Raspberry Pis and resource-constrained
-environments. This document reports what was **measured** (below), then
-documents the optimisation techniques used in the codebase.
+Sentinel serves:
+
+- low-end servers
+- Raspberry Pi units
+- hosts with small resources
+
+This file gives test results first.
+Then it shows design methods that keep CPU and memory low.
 
 ---
 
 # Measured performance (v0.6.0)
 
-## How these numbers were produced - read this first
+## How the team made these numbers - read this first
 
-**No physical hardware was used.** Every number comes from CPU- and
-memory-limited Docker containers on an x86_64 host, approximating device
-classes:
+The team used no physical hardware.
+All numbers come from CPU and memory caps in Docker containers on an x86_64 host.
+The caps stand for device classes:
 
 | Profile | Container limits | Approximates |
 |---------|------------------|--------------|
 | `pi3` | `--cpus=0.5 --memory=256m` | Raspberry Pi 3 |
 | `pi4` | `--cpus=1 --memory=512m` | Raspberry Pi 4 / small VPS |
 
-These constrain CPU share and memory ceiling. They do **not** reproduce ARM
-instruction timing, slower RAM, SD-card IO latency, or thermal throttling. Real
-Pi hardware will be slower in absolute terms. The *relative* before/after
-comparison is the meaningful result; the absolute figures are not a prediction
-of Pi performance.
+These caps bound CPU share and memory size.
+They do not copy these traits:
 
-Before and after were measured **in the same session, back to back, under the
-same host load** - results from different sessions are not comparable. 30s per
-run, first samples discarded as startup transient.
+- ARM command time
+- slow RAM
+- SD card delay
+- heat limits
+
+A real Pi runs slow in true terms.
+The before and after change is the true result.
+The absolute values do not predict Pi speed.
+
+The team took before and after values in the same session, back to back, at the same host load.
+Values from separate sessions do not compare.
+Each run lasts 30s.
+The team drops first samples as start effect.
 
 Reproduce with:
 
@@ -39,9 +51,10 @@ python3 bench/summarize.py bench/results/after
 
 ## v0.5.1 → v0.6.0
 
-`Cgroup CPU%` is the share of the container's CPU quota - the figure that
-matters on a constrained device. `max` is the worst single sample, i.e. the
-spike a user would feel as a stutter.
+`Cgroup CPU%` shows the share of the container CPU quota.
+This share is the value that counts on a small device.
+`max` shows the worst single sample.
+It shows the spike that a user feels as a stutter.
 
 **Pi 3 profile (`--cpus=0.5 --memory=256m`)**
 
@@ -65,36 +78,37 @@ spike a user would feel as a stutter.
 
 ### What improved
 
-- **Worst-case CPU spike: 12.9% → 1.3% of quota (Pi 3 TUI), 23.3% → 0.9%
-  headless.** This is the headline result. The old sequential fetch loop
-  bunched all its work - including subprocess spawns - into one burst on the
-  render thread; that burst *was* the UI freeze. Spreading collectors across
-  threads with their own intervals removed it.
-- **Mean CPU roughly halved** (0.9% → 0.3% of quota).
-- **Fewer wakeups**: the render loop now sleeps until the next data refresh or
-  clock second instead of waking every 500ms, and skips the repaint entirely
-  when nothing changed - about 75% of full repaints eliminated at the default
-  2s refresh.
+- **Worst-case CPU spike fell.** Numbers fell from 12.9% to 1.3% of quota
+  (Pi 3 TUI) and from 23.3% to 0.9% (headless). The old fetch loop did all
+  work in one burst on the render thread. That burst froze the view.
+  Threads now spread collectors at separate times. Each collector keeps its
+  own interval. The burst is gone.
+- **Mean CPU use fell to half the old value (0.9% → 0.3% of quota).**
+- **Fewer wakeups.** The render loop now sleeps until the next data
+  refresh or clock second. It no longer wakes each 500ms. It skips the full
+  repaint when data shows no change. This drops near 75% of full repaints
+  at the normal 2s refresh.
 
 ### What regressed
 
-- **RSS: 20MB → 31MB in normal mode.** Replacing the `curl` subprocess with
-  `urllib` means `urllib.request` → `ssl` → `email.parser` are imported into
-  Sentinel's own address space (~10MB) instead of living in a short-lived
-  child process. The CPU win came at a memory cost.
-- **`--light` mode does not pay this**: it no longer starts the public-IP and
-  update-check collectors, so `urllib` is never imported. **21.4MB vs 31.5MB.**
-  On a 256MB Pi 3 that is the difference between 8% and 12% of total RAM.
-  **Use `--light` on Pi-class hardware.** (Measured in isolation, without the
-  TUI's history buffers: 13.7MB light vs 23.6MB normal.)
-- Container CPU-throttle events went slightly up on the Pi 3 profile (2 → 5
-  over 30s). Work is now spread across threads, which schedules more burstily
-  against a 0.5-CPU quota even though total CPU is lower. Counts are small and
-  noisy; no user-visible effect was observed.
+- **RSS grew in normal mode (20MB → 31MB).** Sentinel now imports
+  `urllib.request`, `ssl`, and `email.parser` in its own address space
+  (~10MB). The old code kept that cost in a short child process. The CPU
+  gain has a memory cost.
+- **`--light` mode avoids this cost.** It never starts the public IP
+  collector or the update check collector. Thus it never imports `urllib`.
+  **21.4MB vs 31.5MB.** On a 256MB Pi 3, this is the gap between 8% and
+  12% of total RAM. **Use `--light` on Pi-class hardware.** (The team took
+  these values without the TUI history buffers: 13.7MB light vs 23.6MB
+  normal.)
+- **Throttle events rose a small count on the Pi 3 profile.** The count
+  rose from 2 to 5 over 30s. Threads now spread work, so short bursts hit
+  the 0.5-CPU quota more often. Total CPU use is still low. Counts stay
+  small and shift between runs. No user felt an effect.
 
 ## Comparison against btop and htop
 
-Same containers, same 30s duration, same session.
+The team used the same containers, the same 30s duration, and the same session.
 
 **Pi 3 profile**
 
@@ -105,53 +119,58 @@ Same containers, same 30s duration, same session.
 | btop | 0.6 | 0.7 (1.4) | 5.6 | 98.9 |
 | htop | 0.1 | 0.2 (0.5) | 3.8 | 0.7 |
 
-- **CPU: Sentinel now uses less than btop** (0.3% vs 0.7% of quota) and is
-  within noise of htop.
-- **Wakeups: Sentinel is far quieter than btop** - 1.5 voluntary context
-  switches/sec vs btop's ~99/s. btop redraws on a fixed fast tick; Sentinel
-  sleeps until something changes.
-- **Memory: Sentinel is 4–6× larger.** ~14MB of that is the CPython
-  interpreter and stdlib before a line of Sentinel runs. This is the one
-  dimension where a compiled monitor wins outright, and no amount of Python
-  optimisation closes it.
+- **CPU: Sentinel now takes less CPU than btop (0.3% vs 0.7% of quota).** The gap to htop stays in test noise.
+- **Wakeups: Sentinel wakes far less than btop.** It makes 1.5 voluntary
+  context switches/sec against btop ~99/s. btop repaints on a fixed fast
+  tick. Sentinel sleeps until a value alters.
+- **Memory: Sentinel takes 4-6x more memory.** Near 14MB of that is the
+  CPython interpreter and stdlib, present before Sentinel starts. A
+  compiled monitor wins in this one area. No Python fix closes this gap.
 
-htop is the floor: it monitors far less (no Docker, Kubernetes, WireGuard,
-security logs, power).
+htop sets the low mark.
+It monitors far less:
+
+- Docker
+- Kubernetes
+- WireGuard
+- security logs
+- power
 
 ## Should this be rewritten?
 
-**No - the evidence does not support a Rust or Go rewrite.**
+**No - the evidence does not back a Rust or Go rewrite.**
 
-The rewrite was gated on profiling showing the Python interpreter to be the
-bottleneck after optimisation. It is not:
+The team sets one gate for a rewrite: proof that the Python interpreter caps speed after all fixes.
+That proof is absent:
 
-- Sentinel's CPU cost is now **below btop's**, a C++ monitor, on the same
-  workload. Interpreted execution is not the limiting factor.
-- The remaining gap is **resident memory**, and it is interpreter baseline
-  (~14MB), not interpreted execution speed. A rewrite would fix that - but it
-  would be a memory rewrite, not a performance rewrite, and it would trade a
-  single dependency-free 3.8k-line file that runs anywhere Python 3 exists for
-  a per-architecture build and release pipeline.
-- The costs that actually hurt were architectural - a blocking fetch loop,
-  subprocess spawns on the render thread, unconditional full repaints - and
-  those were fixable in place. They have been fixed.
+- Sentinel CPU cost now stays **below btop**, a C++ monitor, at the same load. Thus interpreter speed does not cap Sentinel.
+- The rest of the gap is **resident memory** from interpreter baseline
+  (~14MB), not from interpreter execution speed. A rewrite would fix
+  memory, not speed. It would trade a single dependency-free 3.8k-line
+  file for a per-architecture build and release pipeline. That file runs
+  where Python 3 exists.
+- The true costs were design faults, and the team fixed those faults in place:
+  - a fetch loop that blocks
+  - subprocess starts on the render path
+  - full repaints with no test
 
-If ~21MB (light mode) is unacceptable for a target device, that is the
-argument for a rewrite. Speed is not.
+If ~21MB (light mode) still breaks a target device, that fact backs a rewrite.
+Speed alone does not back it.
 
 ## ARM verification (aarch64 + armv7)
 
-**Compatibility was verified; ARM performance was not measured, and cannot be
-from this setup.**
+**The team proved ARM run; the team took no ARM performance values, and this rig cannot take them.**
 
-No rewrite happened, so there is nothing to cross-compile - Sentinel is a
-single pure-Python file. What needed proving is that it *runs* correctly on
-ARM: imports, `/proc` and `/sys` parsing (which differs from x86 - ARM has no
-`model name` field in `/proc/cpuinfo`), curses rendering, and both entry-point
-modes.
+No rewrite took place, so Sentinel needs no cross build.
+It is one pure-Python file.
+The team proved correct ARM run for these parts:
 
-Both architectures were smoke-tested under QEMU user-mode emulation via
-`binfmt_misc`:
+- imports
+- reads of `/proc` and `/sys` (differs from x86: ARM has no `model name` field in `/proc/cpuinfo`)
+- curses display
+- both entry-point modes
+
+Both chip types passed a smoke test in QEMU user-mode emulation through `binfmt_misc`:
 
 ```bash
 docker run --privileged --rm tonistiigi/binfmt --install arm64,arm
@@ -168,41 +187,39 @@ docker run --privileged --rm tonistiigi/binfmt --install arm64,arm
 | `--light` TUI paints a frame | ✅ | ✅ |
 | Degraded features explained, not blank | ✅ | ✅ |
 
-**16 of 16 checks passed.** CPU detection resolves correctly through the ARM
-path - an aarch64 container reports `ARMv8 Processor rev 0 (v8l)`, read from
-the `Processor`/`Hardware` fields rather than x86's `model name`.
+**16 of 16 checks passed.**
+CPU detection takes the ARM path.
+An aarch64 container reports `ARMv8 Processor rev 0 (v8l)` from the `Processor`/`Hardware` fields, not from x86 `model name`.
 
-**Why no ARM numbers are published:** QEMU user-mode emulation translates ARM
-instructions on an x86_64 host with a large and uneven slowdown, so any timing
-taken here would describe the emulator, not a Pi. Resident memory is equally
-unusable, since the RSS visible in the container belongs to the QEMU process
-and includes translation-cache overhead. **QEMU validates compatibility, not
-performance.** Every performance figure in this document is x86_64.
+**Why the file gives no ARM values:** QEMU user-mode emulation turns ARM commands to x86_64 commands on the host, with big rough delay.
+Thus a time value here would show the emulator, not a Pi.
+Stored memory values also fail: the RSS in the container fits the QEMU process and adds translation-cache overhead.
+**QEMU proves that code runs; it does not prove speed.**
+Each performance value in this file is x86_64.
 
-Getting real ARM performance numbers requires a physical Pi. Until someone runs
-`bench/run_profiles.sh` on one, treat the relative before/after improvements as
-the transferable result - they come from removing blocking work and repaints,
-which is architecture-independent - and treat the absolute figures as x86_64
-only.
+Only a real Pi gives true ARM performance values.
+Until a user runs `bench/run_profiles.sh` on a Pi, take the change values as the firm result.
+They stem from cut of work that blocks and of full repaints.
+That gain holds for each chip type the same.
+Take absolute values as x86_64 only.
 
 ## Known issues
 
-- **Benchmark flakiness on Docker Desktop for Windows.** Roughly 1 run in 6
-  under tight memory limits dies during interpreter startup with an `OSError`
-  from an import reading the bind-mounted checkout - before any Sentinel code
-  runs. It reproduces on v0.5.1 as well, so it is a host artifact, not a code
-  regression. `bench/run_profiles.sh` retries a run that yields no samples.
-- **No ARM performance data.** aarch64 and armv7 are verified to *run*
-  correctly (see above), but every performance number in this document is
-  x86_64. QEMU cannot produce meaningful ARM timings, and no physical Pi was
-  available.
-- **`bench/capture_frame.py` does not model terminal scrolling**, so its
-  captured grid can be one row off and may show remnants from earlier frames.
-  Assert on content presence, not exact positions. This affects the test tool
-  only.
-- **Temperature sensors and RAPL do not work inside WSL2, VMs or containers.**
-  This is a platform limitation - those interfaces are not exposed to the
-  guest - not a bug. Panels report it rather than showing zeros silently.
+- **Runs fail at times on Docker Desktop for Windows.** Near 1 run in 6
+  at tight memory caps dies at tool start. The cause is an `OSError` from
+  an import that reads the bind-mounted checkout. This hits before
+  Sentinel code starts. It also hits v0.5.1, so the host causes it, not new
+  code. `bench/run_profiles.sh` starts the run anew when the run yields no
+  samples.
+- **No ARM performance values exist.** aarch64 and armv7 run in a correct
+  way (see above), but each performance value in this file is x86_64. QEMU
+  cannot give true ARM time values, and the team had no real Pi.
+- **`bench/capture_frame.py` does not copy terminal scroll.** So its grid
+  can sit one row off and can show bits of past frames. Test for content,
+  not for exact spot. This fault hits the test tool alone.
+- **Temperature sensors and RAPL fail in WSL2, VMs, or containers.** The
+  platform hides those ports from the guest. This is a platform cap, not a
+  fault. Panels say so; they never show false zeros.
 
 ---
 
@@ -210,17 +227,24 @@ only.
 
 ## How Sentinel collects data
 
-Two tiers, split by cost:
+Cost splits the reads in two ranks:
 
-**Inline, on the render thread** - only sub-millisecond `/proc` and `/sys`
-reads: CPU, memory, disk (`os.statvfs`), network counters, uptime, battery,
-RAPL energy. These are cheap enough that threading them would cost more than
-it saves.
+**The render thread holds inline reads.** It takes only fast reads from `/proc` and `/sys`:
 
-**Background collectors** - everything slow or IO-bound runs on its own daemon
-thread at its own interval. `update_data()` merges the latest published
-snapshot and never waits. A collector that fails keeps serving its last good
-result and records the error for the diagnostics overlay.
+- CPU
+- memory
+- disk (`os.statvfs`)
+- network counters
+- uptime
+- battery
+- RAPL power
+
+These reads cost so small that a thread for them would cost more than it saves.
+
+**Background collectors hold slow reads.** Each slow read and each read that waits runs on a daemon thread at an interval of its own.
+`update_data()` merges the latest sent snapshot and never waits.
+A collector that fails still serves its last good value.
+It logs the fault for the diagnostics overlay.
 
 | Collector | Interval | Why |
 |-----------|----------|-----|
@@ -236,16 +260,20 @@ result and records the error for the diagnostics overlay.
 | `public_ip` | 300s | Network round-trip *(disabled in light mode)* |
 | `update_check` | 24h (7d light) | Network round-trip *(disabled in light mode)* |
 
-Intervals reflect how fast the data actually changes, not the refresh rate.
-Docker and Kubernetes are not polled every 2 seconds for data that changes
-every few minutes.
+Intervals track how fast values truly alter, not the refresh rate.
+Sentinel never polls Docker or Kubernetes each 2 seconds for values that alter each few minutes.
 
 ## Techniques in use
 
 ### Direct `/proc` and `/sys` reads, no subprocesses
 
-Spawning a process to read a file costs a fork, an exec and a pipe. Sentinel
-reads the file.
+A child start that reads a file has three costs:
+
+- a fork
+- an exec
+- a pipe
+
+Sentinel reads the file.
 
 ```python
 # BAD - spawns a process
@@ -256,79 +284,96 @@ with open('/sys/class/thermal/thermal_zone0/temp') as f:
     temp = int(f.read()) / 1000
 ```
 
-`shell=True` does not appear anywhere in the codebase. The single remaining
-`subprocess.run` call site takes an argv list - used only by `kubectl`,
-`wg` and `iwgetid`, all on background collectors, never on the render path.
+`shell=True` never shows in the code.
+One `subprocess.run` call site stays, and it takes a list of terms.
+Only these three commands use it:
+
+- `kubectl`
+- `wg`
+- `iwgetid`
+
+All three run on background collectors, never on the render path.
 
 ### Docker over the unix socket, not the CLI
 
-`docker ps`, `docker stats` and `docker system df -v` were subprocess spawns
-every cycle; the volume fallback ran `docker system df -v | grep | awk` *once
-per volume*. Sentinel now speaks HTTP to `/var/run/docker.sock` with a small
-stdlib client. `DOCKER_HOST` values that are not local unix sockets are
-reported as `unsupported_host` rather than silently ignored.
+Old code started a child per cycle for:
+
+- `docker ps`
+- `docker stats`
+- `docker system df -v`
+
+The old volume path ran `docker system df -v | grep | awk` once per volume.
+Sentinel now sends HTTP to `/var/run/docker.sock` with a small stdlib client.
+Sentinel marks a `DOCKER_HOST` value that is not a local unix socket as `unsupported_host`.
+It never drops the value with no note.
 
 ### One `/proc/stat` read per cycle
 
-Aggregate CPU and per-core usage come from a single read, parsed once, instead
-of one read per core.
+Total CPU and per-core use come from one read.
+Sentinel reads once and splits the text once, not once per core.
 
 ### Process scan reads `stat` only
 
-RSS comes from field 24 of `/proc/<pid>/stat`, so `/proc/<pid>/status` - and
-its line-by-line scan - is never opened. Halves the syscalls on a scan that
-touches every PID.
+RSS lives in field 24 of `/proc/<pid>/stat`, so Sentinel never opens `/proc/<pid>/status` with its line scan.
+This cuts the call count in half on a scan that meets each PID.
 
 ### Repaint only when something changed
 
-A frame signature (data generation, feature-status revision, terminal size,
-theme, layout, refresh rate, open overlay) decides whether a repaint could
-change anything. If it cannot, the ~2000-`addstr` redraw is skipped and only
-the header clock is updated. Roughly 75% of full repaints disappear at the
-default 2s refresh.
+A frame signature tells if a repaint can alter the view.
+It holds:
 
-`SENTINEL_NO_FRAMESKIP=1` restores unconditional repainting.
+- data generation
+- feature-status revision
+- terminal size
+- theme
+- layout
+- refresh rate
+- open overlay
+
+When a repaint cannot alter the view, Sentinel skips the ~2000-`addstr` redraw and only writes the header clock.
+This drops near 75% of full repaints at the normal 2s refresh.
+
+`SENTINEL_NO_FRAMESKIP=1` brings back repaints with no test.
 
 ### Sleep until the next change, not on a fixed tick
 
-`getch()` returns immediately on a keypress regardless of its timeout, so the
-timeout is set to whichever comes first - the next data refresh or the next
-clock second - instead of a fixed 500ms. Fewer idle wakeups, identical key
-latency.
+`getch()` stops at once on a key, whatever its wait cap.
+Thus the wait cap fits the first of two events:
+
+- the next data refresh
+- the next clock second
+
+It is not a fixed 500ms.
+Idle wakeups fall, and key delay stays the same.
 
 ### Deferred imports
 
-`http.client` (~8MB, it pulls in `email.parser`) and `urllib.request` (~2MB)
-are imported at their call sites. A host with no Docker daemon never pays for
-the Docker client.
+`http.client` (~8MB, it brings `email.parser`) and `urllib.request` (~2MB) load at the call spot.
+A host with no Docker daemon never pays for the Docker client.
 
 ### Pre-compiled regex
 
-Security-log patterns are compiled once at startup and reused, rather than
-re-compiled per line on every parse.
+Sentinel compiles security log patterns once at start and reuses them.
+It never builds them per line per read.
 
 ### Fixed-size ring buffers
 
-All history uses `collections.deque(maxlen=N)` - 100 points normally, 50 in
-light mode. Bounded by construction, so history cannot leak.
+All history uses `collections.deque(maxlen=N)` with 100 points in normal use and 50 in light mode.
+Bounds live in the form, so history cannot leak.
 
 ### Windowed cleanup for security events
 
-Failed-login and suspicious-IP trackers keep a 5-minute window
-(`failed_login_window`) and drop older entries, so memory stays flat on a host
-under sustained attack.
+Failed login and suspicious IP lists keep a 5-minute frame (`failed_login_window`) and drop old terms.
+Thus memory stays flat while bad logins strike for a long time.
 
 ## Update checker
 
-- Fetches only the first 8KB of `sentinel-monitor.py` from GitHub via
-  `urllib`, with a 3-second timeout - no `curl` subprocess.
-- Runs on a background collector: once per 24 hours, weekly in light mode.
-- Compares semantic versions and only notifies when the remote version is
-  higher.
-- Failures are recorded as `update_check: error` in the diagnostics overlay
-  rather than shown as a popup.
-- **Disabled entirely in light mode** (see below).
-- Shows a dimmed notice in the footer when an update exists.
+- It takes only the first 8KB of `sentinel-monitor.py` from GitHub through `urllib`, with a 3-second cap, and starts no `curl` child.
+- It runs on a background collector: one time per 24 hours, one time per week in light mode.
+- It compares semantic versions and warns only when the remote version is new.
+- Faults show as `update_check: error` in the diagnostics overlay, never as a popup.
+- **Light mode turns it off in full** (see below).
+- Sentinel shows a dim note in the footer when a new version waits.
 
 To update:
 
@@ -336,16 +381,15 @@ To update:
 curl -sL https://raw.githubusercontent.com/VidGuiCode/sentinel/main/install-sentinel.sh | sudo bash
 ```
 
-The installer preserves existing config files.
+The installer keeps each old configuration file.
 
 ## Light mode
 
-**Recommended on Pi-class hardware** - measured at 21.4MB RSS versus 31.5MB
-normal (Pi 3 profile).
+**First choice for Pi-class hosts**; tests show 21.4MB RSS versus 31.5MB normal (Pi 3 profile).
 
-Enabled by `--light`, by `light_mode: true` in the config, or automatically
-when `/proc/cpuinfo` looks like low-resource hardware (Raspberry Pi 4 /
-BCM2711, or a low core and RAM count).
+Turn it on with `--light` or with `light_mode: true` in the configuration file.
+Sentinel also turns it on when `/proc/cpuinfo` looks like weak hardware.
+Weak hardware means Raspberry Pi 4 / BCM2711, or a low core and RAM count.
 
 What it changes:
 
@@ -359,41 +403,37 @@ What it changes:
 | Public IP collector | on | **off** |
 | Update check collector | on | **off** |
 
-Disabling the two network collectors is what saves the ~10MB: they are the
-only reason `urllib` - and through it `ssl` and `email.parser` - is imported
-at all. Both report themselves as `disabled in light mode` in the diagnostics
-overlay, with the setting to change if you want them back.
+The two network collectors stay off, and that saves the ~10MB.
+No other code loads `urllib`, so `ssl` and `email.parser` stay out too.
+Both mark themselves as `disabled in light mode` in the diagnostics overlay, with the setting to turn them back.
 
-## Tuning for low-end hosts
+## Tune Sentinel for a low-end host
 
-**1. Use light mode.** The single biggest win.
+**1. Use light mode.** It gives the top gain.
 
 ```bash
 sentinel --light
 ```
 
-**2. Slow the refresh rate.** Press `-` in the TUI (up to 10s), or set
-`refresh_rate` in the config. Fewer data refreshes means fewer repaints, since
-repaints are now driven by data changes.
+**2. Slow the refresh rate.** Press `-` in the TUI (up to 10s), or set `refresh_rate` in the configuration file.
+Slow refresh means slow repaints, since data change now fires repaints.
 
-**3. Use a lighter layout.** Press `l` to cycle; `minimal` draws the fewest
-panels.
+**3. Use a lighter layout.** Press `l` to cycle; `minimal` draws the least panels.
 
-**4. Turn off the public IP lookup** if you do not need it:
+**4. Turn off the public IP lookup** when the host does not need it:
 
 ```json
 { "public_ip_check": false }
 ```
 
-**5. Filter large log files.** Security-log parsing cost scales with how much
-log there is to read. Pointing Sentinel at a pre-filtered file keeps the
-parser cheap:
+**5. Send small log files to the security log parser.** Read cost grows with log size.
+A pre-filtered file keeps the parser fast:
 
 ```json
 { "security_logs": { "auth": "/var/log/auth-filtered.log" } }
 ```
 
-**6. Use service mode on headless hosts.** No curses, no rendering:
+**6. Use service mode on headless hosts.** It uses no curses and writes no display:
 
 ```bash
 sentinel --service
@@ -403,14 +443,14 @@ sentinel --service
 
 ### A panel is empty
 
-Press `d`. The diagnostics overlay lists every degradable feature with its
-state (`ok`, `no permission`, `not installed`, `socket missing`,
-`unsupported host`, `disabled`, `error`), the detail, and the exact command to
-fix it. Panels also state their status inline.
+Press `d`.
+The diagnostics overlay lists each degradable feature with its state and its note.
+States use fixed terms: `ok`, `no permission`, `not installed`, `socket missing`, `unsupported host`, `disabled`, `error`.
+It also gives the exact command that fixes the fault.
+Panels also say their state in place.
 
-Permissions are re-probed every 30 seconds, so fixing one mid-session - adding
-yourself to the `docker` group, `chmod`-ing a log, starting a daemon - is
-picked up without restarting.
+Sentinel tests permissions each 30 seconds, so a fix in the same session takes hold with no restart.
+This holds for a group join, a log `chmod`, or a daemon start.
 
 ### High CPU
 
@@ -418,24 +458,24 @@ picked up without restarting.
 SENTINEL_PROFILE=/tmp/sentinel-profile.jsonl sentinel
 ```
 
-Writes one JSON line per data refresh: per-stage timings, per-collector
-durations and errors, subprocess counts, and frames drawn versus skipped. That
-identifies which collector is expensive rather than guessing.
+It writes one JSON line per data refresh.
+The line holds per-stage times, per-collector times and faults, subprocess counts, and frames drawn versus skipped.
+That shows which collector costs most, so the user need not guess.
 
-Common causes: a host with very many containers, or very large security logs
-(see tuning above).
+A host with a high count of containers strains the scan.
+Large security logs also strain the parser (see tips above).
 
-### Diagnosing feature detection
+### How to check feature detection
 
 ```bash
 SENTINEL_DEBUG=1 sentinel
 ```
 
-Logs every feature-status transition to `/tmp/sentinel-debug.log`.
+It logs each feature-status transition to `/tmp/sentinel-debug.log`.
 
-### Rendering artifacts
+### Terminal display faults
 
-If your terminal mishandles partial updates:
+When the terminal fails on partial updates, run:
 
 ```bash
 SENTINEL_NO_FRAMESKIP=1 sentinel
@@ -443,21 +483,22 @@ SENTINEL_NO_FRAMESKIP=1 sentinel
 
 ## Comparison with other tools
 
-Measured numbers are in [Comparison against btop and
-htop](#comparison-against-btop-and-htop) above. Summary: Sentinel's CPU cost is
-now below btop's and it wakes far less often, but it uses 4–6× more resident
-memory, most of which is the CPython interpreter itself.
+True test values sit in [Comparison against btop and htop](#comparison-against-btop-and-htop) above.
+In short: Sentinel CPU cost now sits below btop cost, and it wakes far less.
+But it takes 4–6× more resident memory, most of it the CPython interpreter itself.
 
-htop is the floor for resource use, and monitors far less - no Docker,
-Kubernetes, WireGuard, security logs or power.
+htop sets the low mark for cost, and it monitors far less:
+
+- Docker
+- Kubernetes
+- WireGuard
+- security logs
+- power
 
 ## Possible future work
 
-- Reduce resident memory further. The remaining floor is the interpreter
-  (~14MB); beyond that only a compiled rewrite moves it, which the measured
-  data does not currently justify - see [Should this be
-  rewritten?](#should-this-be-rewritten).
-- Real ARM performance numbers from physical hardware. Compatibility is
-  verified under QEMU; performance is not measurable that way.
-- Per-panel refresh intervals exposed in the config, so users can trade
-  freshness for CPU per feature rather than globally.
+- Cut resident memory more. The firm floor is the interpreter (~14MB).
+  Past that, only a compiled rewrite shifts it. The evidence does not back
+  it now - see [Should this be rewritten?](#should-this-be-rewritten).
+- Take true ARM performance values on real hardware. QEMU proves that code runs; it cannot test speed.
+- Put per-panel intervals in the configuration file, so users can trade freshness for CPU per feature, not just for the whole tool.

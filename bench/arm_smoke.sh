@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# ARM compatibility smoke test (aarch64 + armv7) under QEMU user-mode emulation.
+# ARM smoke test (aarch64 and armv7) under QEMU user-mode emulation.
 #
-# This validates COMPATIBILITY ONLY, not performance. QEMU emulates ARM
-# instructions on an x86_64 host with a large and uneven slowdown, so any
-# timing measured here would be meaningless. Do not publish numbers from it.
+# This checks COMPATIBILITY ONLY, not speed. QEMU turns ARM commands
+# into x86_64 commands on the host with a large and rough slowdown.
+# So all times from here mean nothing. Do not print numbers from it.
 #
-# Prerequisite (registers qemu-aarch64 / qemu-arm with binfmt_misc):
+# Need first (it links qemu-aarch64 and qemu-arm with binfmt_misc):
 #     docker run --privileged --rm tonistiigi/binfmt --install arm64,arm
 #
 # Usage:  ./bench/arm_smoke.sh
@@ -45,7 +45,7 @@ run_arch() {
   check "--help" "service mode" \
     "$(docker run --rm --platform "$platform" "$tag" python3 sentinel-monitor.py --help 2>&1)"
 
-  # Headless mode must emit real sampled values, i.e. /proc parsing worked.
+  # Headless mode must send true read values. Then /proc parse works.
   check "--service emits samples" "CPU: +[0-9]+\.[0-9]%.*MEM: +[0-9]+\.[0-9]%" \
     "$(docker run --rm --platform "$platform" "$tag" \
         timeout 12 python3 sentinel-monitor.py --service 2>&1)"
@@ -54,7 +54,7 @@ run_arch() {
     "$(docker run --rm --platform "$platform" "$tag" \
         timeout 12 python3 sentinel-monitor.py --service --light 2>&1)"
 
-  # curses TUI must actually paint a frame (box-drawing glyphs present).
+  # The curses panel must truly draw a frame (box shapes present).
   check "TUI renders a frame" "[│┌└]" \
     "$(docker run --rm --platform "$platform" -e TERM=xterm-256color "$tag" \
         python3 bench/capture_frame.py --duration 25 --rows 45 --cols 150 \
@@ -65,14 +65,14 @@ run_arch() {
         python3 bench/capture_frame.py --duration 25 --rows 45 --cols 150 \
           -- python3 sentinel-monitor.py --light 2>&1)"
 
-  # Degraded feature reporting must work here too, not just on x86_64.
+  # Cut-feature reports must work here too, not only on x86_64.
   check "degraded features explained" "not installed|socket missing|no permission" \
     "$(docker run --rm --platform "$platform" -e TERM=xterm-256color "$tag" \
         python3 bench/capture_frame.py --duration 25 --rows 45 --cols 150 --keys d \
           -- python3 sentinel-monitor.py 2>&1)"
 }
 
-echo "NOTE: QEMU user-mode emulation validates compatibility, not performance."
+echo "NOTE: QEMU user-mode emulation checks compatibility, not speed."
 echo
 
 run_arch linux/arm64   sentinel-arm64 aarch64

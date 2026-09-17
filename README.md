@@ -1,6 +1,6 @@
-# Sentinel v0.6 - Universal Linux System Monitor
+# Sentinel v0.6 - Linux Host Monitor
 
-A lightweight terminal UI (TUI) system monitor for Linux with real-time graphs, container monitoring, security log analysis, and infrastructure-focused design. Inspired by btop. Optimized for low-power devices.
+Sentinel monitors Linux hosts in the terminal. It shows live graphs, data from containers, data from security logs, and data from services. It uses one Python file and only the standard library. btop gave the idea for the design. It runs on hosts with small CPUs and small memory.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.6+-green.svg)
@@ -9,66 +9,82 @@ A lightweight terminal UI (TUI) system monitor for Linux with real-time graphs, 
 
 ## Quick start
 
+To start Sentinel fast, do these steps:
+
 ```bash
 curl -sL https://raw.githubusercontent.com/VidGuiCode/sentinel/main/install-sentinel.sh | sudo bash
 sentinel
 ```
 
+- Install Sentinel with the command in the code block.
+- Type `sentinel` in the terminal.
+
 ## Features
 
-### System Monitoring
-- **CPU** - Per-core usage bars, gradient graph, temperature, frequency, governor
-- **Memory** - Usage with history graph, available memory tracking
-- **Disk** - Mount points with progress bars, Docker volume names & sizes
-- **Network** - Live traffic (KB/s), sparkline graphs, VPN status, proxy stats
-- **Energy** - RAPL power (desktops), battery stats (laptops)
-- **Docker** - Dynamic container list, running/stopped count, volume sizes
-- **Kubernetes** - Pod status, node health, failed/pending alerts
-- **Processes** - Task count, top CPU/memory consumers
-- **Proxy** - Nginx/Caddy traffic monitoring (requests per second)
-- **Security** - Authentication log analysis, failed login tracking, brute force detection
+### Core data
+
+- **CPU** - Sentinel shows bars for each core, a graph for load, heat data, clock speed, and the governor name.
+- **Memory** - Sentinel shows use of memory, free memory, and a graph for past use.
+- **Disk** - Sentinel shows mount points, free space bars, volume names from Docker, and size data.
+- **Network** - Sentinel shows traffic in KB/s, small graphs, VPN state, and proxy facts.
+- **Energy** - Sentinel shows power data from RAPL on desk hosts and battery data on portable hosts.
+- **Docker** - Sentinel shows the list of containers, the count of containers that run, the count of containers that stop, and the size of volumes.
+- **Kubernetes** - Sentinel shows the state of pods, the state of nodes, and alerts for pods that fail or wait.
+- **Processes** - Sentinel shows the task count and the top users of CPU and memory.
+- **Proxy** - Sentinel shows requests per second for Nginx and Caddy.
+- **Security** - Sentinel reads auth logs, counts failed logins, and raises alerts for brute force attacks.
 
 ### v0.6 Features
-- **Non-blocking collectors** - Docker, Kubernetes, logs and network lookups run
-  on background threads with per-feature intervals; the UI never waits on them
-- **No subprocesses on the render path** - Docker Engine API over
-  `/var/run/docker.sock`, `urllib` instead of `curl`, no `shell=True` anywhere
-- **Change-driven rendering** - the screen repaints only when something actually
-  changed, and the input loop sleeps until the next change instead of ticking
-- **Self-explaining panels** - an unavailable feature says whether it is not
-  installed, permission-denied or failed; press `d` for the exact fix command
-- **Retryable permissions** - fix a permission mid-session and it is picked up
-  within 30s, no restart
-- **Leaner light mode** - skips the public-IP and update checks, saving ~10MB
-  RSS (21MB vs 31MB); recommended on Raspberry Pi
-- **Benchmark harness** (`bench/`) - measures CPU, RSS, wakeups and throttling
-  under simulated device profiles, verifies graceful degradation, and
-  smoke-tests aarch64/armv7 under QEMU
+
+- **Collectors that do not block** - Collectors run in background threads.
+  Collectors cover Docker, Kubernetes, logs, and network lookups. Each
+  collector uses its own interval. The screen never waits for a collector.
+- **Zero child acts on the screen path** - Sentinel talks to the Docker
+  Engine API through `/var/run/docker.sock`. It uses `urllib` in place of
+  `curl`. It starts zero child processes and uses zero `shell=True`.
+- **Paint only on change** - The screen paints again only when a fact changes. The input loop sleeps till the next change.
+- **Panels that state the cause** - A panel that lacks data states the
+  cause. The cause is one of three: the tool misses on the host, access
+  fails, or the probe fails. Press `d` for the exact fix command.
+- **Access fix with zero restart** - You fix access in mid-session. Sentinel picks up the fix in 30s. You need zero restart.
+- **Light mode with less memory** - Light mode skips the public-IP check
+  and the update check. It saves ~10MB RSS (21MB vs 31MB). Use it on
+  Raspberry Pi.
+- **Test rig in `bench/`** - The `bench/` folder measures CPU, RSS,
+  wakeups, and throttle facts. It uses simulated host profiles. It checks
+  that Sentinel slows in safe steps. It tests aarch64 and armv7 under QEMU.
 
 ### v0.5 Features
-- **Security log monitoring** - Real-time analysis of auth.log, syslog, and secure logs
-- **Failed login tracking** - Monitor authentication failures with IP address tracking
-- **Brute force detection** - Automatic alerts for >20 failed logins from same IP in 5 minutes
-- **Security statistics** - Top suspicious IPs, failed vs successful login ratios, error type tracking
-- **Regex-based log parsing** - Extract timestamps, hostnames, programs, PIDs, usernames, and IPs
-- **Security layout mode** - Press `l` to emphasize security monitoring panel
-- **Windowed analysis** - Time-based metrics for failed logins per 5-minute windows
+
+- **Security log read** - Sentinel reads auth.log, syslog, and secure logs as facts arrive.
+- **Failed login count** - Sentinel counts failed logins with the IP address for each case.
+- **Brute force alert** - Sentinel raises an alert for more than 20 failed logins from one IP in 5 minutes.
+- **Security facts** - Sentinel shows top suspect IPs, the ratio of failed to good logins, and error type counts.
+- **Pattern parse** - Sentinel pulls time, host name, program, PID, user name, and IP from each log line with patterns.
+- **Security view** - Press `l` to stress the security panel.
+- **Span counts** - Sentinel counts failed logins per 5-minute span.
 
 ### v0.4 Features
-- **Loading modal** - Shows spinner during initial data load
-- **Help overlay** - Press `h` to see all keybindings
-- **Adjustable refresh rate** - Press `+`/`-` to speed up or slow down (1-10s)
-- **Layout modes** - Press `l` to cycle: default, cpu, network, docker, security, minimal
-- **Dynamic container lists** - Auto-adjusts to available space
-- **Improved temperature detection** - Works on ARM, VMs, containers
-- **Proxy traffic monitoring** - Shows nginx/caddy requests per second
-- **Wider graphs** - 100 data points for full-width terminal graphs
-- **Performance optimized** - Fast startup on low-power devices
-- **Enhanced network panel** - Connection quality meter, VPN handshake age, proper link speed
-- **Docker volumes with sizes** - Shows actual volume names and storage used
+
+- **Load modal** - Sentinel shows a spinner while it loads first data.
+- **Help overlay** - Press `h` to see all keys.
+- **Refresh speed** - Press `+` to raise the refresh speed. Press `-` to lower the refresh speed. The range spans 1s to 10s.
+- **Views** - Press `l` to cycle the views: default, cpu, network, docker, security, minimal.
+- **Container lists** - Sentinel fits the container list to free screen space.
+- **Heat read** - Sentinel reads heat data on ARM, VMs, and containers.
+- **Proxy facts** - Sentinel shows requests per second for nginx and caddy.
+- **Wide graphs** - Graphs hold 100 points and fill the full terminal width.
+- **Fast start** - Sentinel starts fast on hosts with small CPUs.
+- **Network panel** - The network panel shows more facts:
+  - A 5-bar meter shows link quality.
+  - It shows the age of each WireGuard peer handshake.
+  - It hides bad -1 values and shows Gbps speed.
+  - It shows full VPN peer IPs with zero cut text.
+- **Volume facts** - Sentinel shows true volume names and used space.
 
 ### Themes
-5 built-in color themes (press `t` to cycle):
+
+Sentinel has 5 color themes. Press `t` to cycle through them.
 
 | Theme | Description |
 |-------|-------------|
@@ -78,40 +94,47 @@ sentinel
 | `gruvbox` | Retro, warm colors |
 | `monokai` | Classic editor theme |
 
-Use `--theme <name>` or press `t` in the TUI to switch.
+Use `--theme <name>` or press `t` in the terminal to change the theme.
 
 ### Alerts
-- CPU usage warnings (configurable thresholds)
-- Temperature color coding (green/yellow/red)
-- Memory pressure indicators
-- Battery low warnings
-- Docker stopped container alerts
-- Kubernetes failed pod alerts
+
+- Sentinel alerts on high CPU use with limits that you set.
+- Sentinel marks heat with green, yellow, or red.
+- Sentinel flags memory strain.
+- Sentinel alerts on low battery.
+- Sentinel alerts on stopped containers in Docker.
+- Sentinel alerts on failed pods in Kubernetes.
 
 ### Network
-- Local IP detection
-- Public IP detection (cached, non-blocking)
-- WireGuard VPN status with peer count and handshake age
-- Real-time traffic graphs with speed indicators
-- Total RX/TX statistics
-- Reverse proxy traffic (nginx/caddy)
-- Connection quality signal meter
-- Link speed display (Mbps/Gbps)
+
+- Sentinel finds the local IP.
+- Sentinel finds the public IP with a stored value and zero block.
+- Sentinel shows WireGuard VPN state with peer count and handshake age.
+- Sentinel shows live traffic graphs with speed facts.
+- Sentinel shows total RX and TX counts.
+- Sentinel shows proxy traffic for nginx and caddy.
+- Sentinel shows a signal meter for link quality.
+- Sentinel shows link speed in Mbps or Gbps.
 
 ## Installation
 
 ### One-Line Install
 
+Pick one command. Type it in the terminal.
+
 ```bash
 curl -sL https://raw.githubusercontent.com/VidGuiCode/sentinel/main/install-sentinel.sh | sudo bash
 ```
 
-Or with wget:
+You can also use wget.
+
 ```bash
 wget -qO- https://raw.githubusercontent.com/VidGuiCode/sentinel/main/install-sentinel.sh | sudo bash
 ```
 
 ### From Source
+
+To build from source, do these steps in order:
 
 ```bash
 git clone https://github.com/VidGuiCode/sentinel.git
@@ -121,6 +144,8 @@ sudo bash install-sentinel.sh
 
 ### Manual (No Installer)
 
+To install by hand with zero installer, do these steps in order:
+
 ```bash
 sudo apt-get install python3 lm-sensors curl
 curl -sL https://raw.githubusercontent.com/VidGuiCode/sentinel/main/sentinel-monitor.py | sudo tee /usr/local/bin/sentinel > /dev/null
@@ -128,6 +153,8 @@ sudo chmod +x /usr/local/bin/sentinel
 ```
 
 ## Usage
+
+Type one of these commands in the terminal:
 
 ```bash
 sentinel                      # Run TUI
@@ -141,7 +168,7 @@ sentinel --help               # Show options
 
 ### Fleet Mode (`--host`)
 
-One screen for the whole homelab - no agent, just SSH + `python3` on each node:
+One screen covers the full homelab. It needs zero agent. It needs only SSH and `python3` on each host:
 
 ```json
 {
@@ -158,12 +185,18 @@ One screen for the whole homelab - no agent, just SSH + `python3` on each node:
 sentinel --host sentinel-hosts.json
 ```
 
-Each row shows CPU%, MEM%, load, uptime, containers, pods and alert count.
-`j`/`k` to move, `Enter` to SSH into that host and launch Sentinel there,
-`r` to re-probe all hosts in parallel, `q` to quit. Dark hosts show *why*
-(timeout, auth failure, missing file) instead of vanishing.
+Each row shows CPU%, MEM%, load, uptime, containers, pods, and alert count.
+
+- Press `j` or `k` to move the mark.
+- Press `Enter` to open SSH to that host. Then start Sentinel on that host.
+- Press `r` to probe all hosts again at the same time.
+- Press `q` to quit.
+
+A dark host states the cause: timeout, auth failure, or lost file.
 
 ### Keyboard Controls
+
+Press these keys in the terminal.
 
 | Key | Action |
 |-----|--------|
@@ -177,32 +210,34 @@ Each row shows CPU%, MEM%, load, uptime, containers, pods and alert count.
 | `+` | Faster refresh (min 1s) |
 | `-` | Slower refresh (max 10s) |
 
-### Permission Status
+### Permission state
 
-Sentinel now detects and displays permission status for all features in the header:
+Sentinel marks access for all tools in the header:
 
-- **D** = Docker, **K** = Kubernetes, **W** = WireGuard
-- **S** = Security logs, **P** = Proxy logs, **R** = RAPL energy
-- **Green** = working, **Red** = permission denied, **Hidden** = not installed
+- D means Docker, K means Kubernetes, and W means WireGuard.
+- S means security logs, P means proxy logs, and R means RAPL energy.
+- Green means the tool acts, red means access fails, and zero mark means the host lacks the tool.
 
-Press `d` to see a full diagnostics panel with:
-- Which features are available vs. permission-denied
-- Exact commands to fix permissions
-- Real-time status of Docker, K8s, WireGuard, logs, and more
+Press `d` to open the diagnostics overlay. It lists:
 
-### Layout Modes
+- Tools that act and tools with failed access.
+- Exact commands that fix access.
+- Live state of Docker, Kubernetes, WireGuard, logs, and more tools.
 
-Press `l` to cycle through layouts:
-- **default** - Balanced view of all panels
-- **cpu** - Emphasize CPU monitoring
-- **network** - Emphasize network stats
-- **docker** - Emphasize container info
-- **security** - Emphasize security log monitoring
-- **minimal** - Compact essential stats only
+### Views
+
+Press `l` to cycle through the views.
+
+- **default** shows all panels in balance.
+- **cpu** puts CPU facts first.
+- **network** puts network facts first.
+- **docker** puts container facts first.
+- **security** puts security log facts first.
+- **minimal** shows only core facts.
 
 ### Configuration
 
-Create config with `sentinel --init-config`:
+Create the configuration file with `sentinel --init-config`:
 
 ```json
 {
@@ -240,14 +275,11 @@ Create config with `sentinel --init-config`:
 }
 ```
 
-A container can be "running" while the app inside has crashed, so a green
-`●` (healthy) or red `✗` (down) is shown next to each running container name
-in the Docker panel. Listener ports that fail to connect raise a `PORT
-CLOSED` alert; containers whose check fails raise `SERVICE DOWN`. Both also
-appear in `sentinel --dump` (`health_healthy`, `health_down`,
-`health_listeners`) and in the fleet table.
+A container can run while the app in it dies. Sentinel puts a green `●` (healthy) or a red `✗` (down) near the name of each container that runs in the Docker panel. A listener port that fails to connect raises a `PORT CLOSED` alert. A container with a failed health check raises a `SERVICE DOWN` alert. The `sentinel --dump` output and the fleet table also hold `health_healthy`, `health_down`, and `health_listeners`.
 
 ### Systemd Service
+
+To run Sentinel as a service, type these commands in order:
 
 ```bash
 sudo cp sentinel.service /etc/systemd/system/
@@ -257,22 +289,22 @@ journalctl -u sentinel -f
 
 ## Requirements
 
-- Python 3.6+ (standard library only - no pip packages)
-- Linux kernel 4.0+
-- Architectures: x86_64, aarch64, armv7 (ARM verified under QEMU emulation)
-- Optional, for the features that use them: `docker` (read access to
-  `/var/run/docker.sock`), `kubectl`, `wg` (WireGuard), `iwgetid` (WiFi SSID),
-  lm-sensors
+You need Python 3.6+. Sentinel uses only the standard library with zero pip packages.
 
-Anything missing or unreadable is reported in the diagnostics overlay (`d`)
-with the command to fix it - Sentinel degrades rather than failing.
+You need Linux kernel 4.0+.
 
-> On Raspberry Pi and other low-memory hosts, run with `--light`.
+Sentinel runs on x86_64, aarch64, and armv7. Tests cover ARM under QEMU.
+
+Some tools add facts when the host has them: `docker` with read access to `/var/run/docker.sock`, `kubectl`, `wg` (WireGuard), `iwgetid` (WiFi SSID), and lm-sensors.
+
+Sentinel lists each lost or locked tool in the diagnostics overlay (`d`) with the command that fixes it. Sentinel still runs with less facts.
+
+> On Raspberry Pi and hosts with small memory, use `--light`.
 > See [PERFORMANCE.md](PERFORMANCE.md) for measured numbers.
 
 ## Windows (WSL2)
 
-Sentinel runs on Windows via WSL2 (Windows Subsystem for Linux):
+Sentinel runs on Windows through WSL2:
 
 ```bash
 # In your WSL2 terminal (Ubuntu/Debian/Arch)
@@ -282,101 +314,102 @@ sentinel
 ```
 
 **Notes:**
-- All features work except temperature sensors and RAPL energy (VM limitation)
-- Docker monitoring works if Docker Desktop WSL2 integration is enabled
-- WireGuard may be limited due to WSL2's NAT network stack
-- Security logs are typically empty unless `sshd` is running inside WSL2
+
+- All tools act except heat sensors and RAPL energy, a VM limit.
+- Sentinel reads Docker facts when you enable integration of Docker Desktop with WSL2.
+- WSL2 NAT stack can curb WireGuard.
+- Security logs stay empty unless `sshd` acts in WSL2.
 
 ## Changelog
 
-Full detail with rationale for each change: [CHANGELOG.md](CHANGELOG.md).
-Measured numbers: [PERFORMANCE.md](PERFORMANCE.md).
+The full facts for each change stay in [CHANGELOG.md](CHANGELOG.md). Measured numbers stay in [PERFORMANCE.md](PERFORMANCE.md).
 
 ### v0.6.1
-- **Fleet mode (`--host`)** - one table for the whole homelab over plain SSH:
-  per-host CPU/RAM/load/uptime/containers/pods/alerts, `Enter` to SSH in,
-  `r` to refresh in parallel. No agent - the probe is `sentinel --dump`
-  (one JSON line) on the remote side.
+
+Fleet mode (`--host`) shows one table for the full homelab through plain SSH. Each host row holds CPU, RAM, load, uptime, containers, pods, and alerts. Press `Enter` to open SSH to that host. Press `r` to probe all hosts at the same time. It needs zero agent. The probe is `sentinel --dump` (one JSON line) on the far host.
 
 ### v0.6.0
-- **Non-blocking UI** - slow collectors (Docker, Kubernetes, logs, network
-  lookups) moved to background threads with per-feature intervals. Worst-case
-  CPU spike on a Pi 3 profile dropped from 12.9% to 1.3% of CPU quota.
-- **No subprocesses on the render path** - Docker CLI replaced by the Engine
-  API over `/var/run/docker.sock`, `curl` replaced by `urllib`, `shell=True`
-  removed entirely.
-- **Repaint only on change** - full-screen redraws cut by ~75% at the default
-  refresh rate, and the input loop no longer wakes every 500ms to do nothing.
-- **Panels explain themselves** - a feature that is unavailable now states
-  whether it is not installed, permission-denied, or failed, and press `d`
-  for the exact fix command. 36 bare `except:` blocks removed.
-- **Retryable permissions** - fixing a permission mid-session is picked up
-  within 30s; no restart needed.
-- **Lower memory in `--light`** - light mode skips the public-IP and update
-  checks, avoiding a ~10MB `urllib`/`ssl` import (21MB vs 31MB RSS).
-  **Recommended on Pi-class hardware.**
-- **Benchmark harness** - `bench/` measures CPU, RSS, wakeups and throttling
-  under simulated device profiles, and verifies graceful degradation.
-- **ARM verified** - aarch64 and armv7 smoke-tested under QEMU emulation
-  (16/16 checks). Compatibility only; all published performance numbers are
-  x86_64.
+
+- **No block from slow collectors** - Slow collectors (Docker, Kubernetes,
+  logs, network lookups) run in background threads with own intervals.
+  Worst CPU use on a Pi 3 profile dropped from 12.9% to 1.3% of CPU quota.
+- **Zero child acts on the screen path** - Sentinel talks to the Docker
+  Engine API through `/var/run/docker.sock`. It uses `urllib` in place of
+  `curl`. The code holds zero `shell=True`.
+- **Paint only on change** - Full screen paints fell by ~75% at the default
+  refresh speed. The input loop no longer wakes each 500ms with zero task.
+- **Panels state the cause** - A tool that lacks data states the cause.
+  The cause is one of three: the host lacks the tool, access fails, or the
+  probe fails. Press `d` for the exact fix command. 36 bare `except:`
+  blocks left the code.
+- **Access fix with zero restart** - A fix to access in mid-session acts in 30s. You need zero restart.
+- **Less memory in `--light`** - Light mode skips the public-IP check and
+  the update check. It avoids a ~10MB `urllib`/`ssl` load (21MB vs 31MB
+  RSS). Use it on Pi-class hosts.
+- **Test rig in `bench/`** - `bench/` measures CPU, RSS, wakeups, and throttle facts in simulated host profiles. It checks safe slowdown.
+- **ARM tests pass** - aarch64 and armv7 pass 16 of 16 checks under QEMU. These tests prove fit only. All speed facts come from x86_64.
 
 ### v0.5.0
-- **Security log monitoring** - Real-time analysis of Linux authentication logs
-- **Failed login tracking** - Monitor and track authentication failures by IP and user
-- **Brute force detection** - Alert system for suspicious login patterns (>20 attempts/5min)
-- **Security statistics** - Top 10 suspicious IPs, failed/successful login ratios, error type breakdown
-- **Regex-based parsing** - Extract minimum 3 fields per log entry (timestamp, hostname, program, PID, user, IP)
-- **Security layout mode** - New layout emphasizing security monitoring panel
-- **Windowed metrics** - Time-based analysis with 5-minute sliding windows
-- **Configurable alerts** - Customizable thresholds for failed login detection
-- **Multi-log support** - Parses auth.log (Debian/Ubuntu), secure (RHEL/CentOS), and syslog
-- Security alerts integrated into main alert system with color-coded severity
+
+- **Security log read** - Sentinel reads Linux auth logs as facts arrive.
+- **Failed login count** - Sentinel counts failed logins by IP and user.
+- **Brute force alert** - Sentinel alerts on suspect login runs with more than 20 tries in 5 minutes.
+- **Security facts** - Sentinel shows top 10 suspect IPs, ratios of failed to good logins, and error type parts.
+- **Pattern parse** - Sentinel pulls at least 3 fields per log line: time, host name, program, PID, user, IP.
+- **Security view** - New view puts the security panel first.
+- **Span metrics** - Time-span counts with 5-minute spans.
+- **Alert limits** - You set own limits for failed login alerts.
+- **Many log types** - Sentinel reads auth.log (Debian/Ubuntu), secure (RHEL/CentOS), and syslog.
+- **Main alert set** - Alerts join the main alert set with color marks for risk.
 
 ### v0.4.0
-- Loading modal with spinner on startup
-- Help overlay (press `h`)
-- Adjustable refresh rate (`+`/`-` keys, 1-10 seconds)
-- Layout modes: default, cpu, network, docker, minimal
-- Dynamic Docker/K8s container lists (auto-adjusts to space)
-- Improved temperature detection (ARM, VMs, containers)
-- Reverse proxy traffic monitoring (nginx/caddy)
-- Wider graphs (100 data points)
-- Docker volumes with names and sizes
-- Performance optimized for low-power devices
-- Enhanced network panel:
-  - Connection quality signal meter (5-bar indicator)
-  - VPN peer handshake age display
-  - Fixed link speed (hides invalid -1 values, shows Gbps)
-  - Full VPN peer IPs (no more truncation)
+
+- **Load modal** - Sentinel shows a load modal with a spinner at start.
+- **Help overlay** - Press `h` for help.
+- **Refresh speed** - Press `+` to raise the refresh speed. Press `-` to lower the refresh speed. The range spans 1s to 10s.
+- **Views** - Views hold default, cpu, network, docker, and minimal.
+- **Container lists** - Docker and Kubernetes lists fit free screen space.
+- **Heat read** - Sentinel reads heat on ARM, VMs, and containers.
+- **Proxy facts** - Sentinel shows nginx and caddy traffic.
+- **Wide graphs** - Graphs hold 100 points.
+- **Volume facts** - Docker volumes show names and size.
+- **Fast start** - Sentinel starts fast on hosts with small CPUs.
+- **Network panel** - The network panel shows more facts:
+  - A 5-bar meter shows link quality.
+  - It shows the age of each WireGuard peer handshake.
+  - It hides bad -1 values and shows Gbps speed.
+  - It shows full VPN peer IPs with zero cut text.
 
 ### v0.3.0
-- Docker container and volume monitoring
-- Kubernetes pod/node monitoring  
-- Config file support
-- 5 color themes
-- Alert thresholds
-- Systemd service mode
-- Per-core CPU bars
+
+- **Docker facts** - Sentinel reads Docker containers and volumes.
+- **Kubernetes facts** - Sentinel reads Kubernetes pods and nodes.
+- **Configuration file** - Sentinel reads the configuration file.
+- **Themes** - Sentinel holds 5 color themes.
+- **Alert limits** - You set alert limits.
+- **Service mode** - Sentinel runs as a systemd service.
+- **CPU bars** - Sentinel shows CPU bars for each core.
 
 ### v0.2.0
-- btop-inspired UI redesign
-- RAPL energy monitoring
-- Performance optimization
-- Gradient graphs and bars
+
+- **New screen** - New screen follows the btop style.
+- **Energy facts** - Sentinel reads RAPL energy facts.
+- **Fast start** - Sentinel starts fast on hosts with small CPUs.
+- **Graphs** - Sentinel draws slope graphs and bars.
 
 ### v0.1.0
-- Initial release
+
+Sentinel saw first release.
 
 ## Open Source
 
-Sentinel is MIT-licensed and built for homelab and Linux users. You can:
+The MIT License covers Sentinel. Sentinel serves homelab and Linux users. You can:
 
-- Use it freely on any Linux machine
-- Open issues or feature requests on GitHub
-- Send pull requests (new panels, themes, bug fixes)
-- Fork it and adapt it for your own infrastructure
+- Use it free on each Linux host.
+- Open issues or feature requests on GitHub.
+- Send pull requests for new panels, themes, or bug fixes.
+- Fork it and fit it to your own hosts.
 
 ## License
 
-MIT License - See LICENSE file.
+The MIT License rules. See the LICENSE file.

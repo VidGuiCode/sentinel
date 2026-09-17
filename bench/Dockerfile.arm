@@ -1,14 +1,14 @@
-# ARM compatibility smoke-test image (aarch64 / armv7).
+# ARM smoke-test image (aarch64 and armv7).
 #
-# Built with `docker build --platform linux/arm64` (or linux/arm/v7) and run
-# under QEMU user-mode emulation via binfmt_misc. This validates that Sentinel
-# *runs* on ARM - imports, /proc and /sys parsing, curses rendering, both
-# entry-point modes. It says nothing about ARM performance: QEMU emulates
-# instructions at a large and uneven slowdown, so timing numbers from this
-# image are meaningless.
+# Build it with `docker build --platform linux/arm64` (or linux/arm/v7).
+# Run it under QEMU user-mode emulation through binfmt_misc. This checks
+# that Sentinel *runs* on ARM: imports, /proc and /sys reads, curses
+# draw, both start modes. It says nothing about ARM speed: QEMU turns
+# commands into slow host steps, so all times from this image mean nothing.
 #
-# The source is COPYed in rather than bind-mounted: emulated containers reading
-# a Docker Desktop for Windows bind mount are both slow and prone to EINVAL.
+# Copy the source in, do not bind-mount it: read of a Docker Desktop
+# for Windows bind mount from an emulated container is slow and can
+# give EINVAL.
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

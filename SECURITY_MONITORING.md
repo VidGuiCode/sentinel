@@ -1,19 +1,21 @@
-# Security Log Monitoring - Implementation Documentation
+# Security Log Monitor - Implementation Notes
 
 ## Overview
 
-Sentinel includes a comprehensive security-focused log monitoring system that analyzes Linux authentication and system logs in real-time. This feature seamlessly integrates with Sentinel's existing monitoring capabilities while maintaining the tool's performance-optimized architecture.
+Sentinel reads the Linux logs for authentication and system events. Sentinel shows the results in the terminal in real time. The collector runs apart from the render loop.
 
 ## Project Requirements Fulfillment
 
 ### 1. Input Data ✓
 
-**Log Files Monitored:**
-- `/var/log/auth.log` - SSH, sudo, and authentication events (Debian/Ubuntu)
-- `/var/log/secure` - Authentication events (RHEL/CentOS)
+**Logs That Sentinel Reads:**
+
+- `/var/log/auth.log` - Authentication events on Debian and Ubuntu
+- `/var/log/secure` - Authentication events on RHEL and CentOS
 - `/var/log/syslog` - General system events
 
 **Configuration:**
+
 ```json
 "security_logs": {
   "auth": "/var/log/auth.log",
@@ -22,21 +24,21 @@ Sentinel includes a comprehensive security-focused log monitoring system that an
 }
 ```
 
-### 2. Parsing (Regular Expressions) ✓
+### 2. Parse With Regular Expressions ✓
 
-**Minimum 3 Extracted Fields Per Log Entry:**
+**Minimum 3 Fields Per Event:**
 
-Each parsed log entry extracts:
+Each event gives these fields:
 
-1. **Timestamp** - `(\w+\s+\d+\s+\d+:\d+:\d+)` - Date and time of event
-2. **Hostname** - `(\S+)` - Server hostname
-3. **Program** - `(\w+)` - Service name (sshd, sudo, systemd)
-4. **PID** - `\[(\d+)\]` - Process ID
-5. **Username** - `(\S+)` - User attempting authentication
-6. **IP Address** - `from (\S+)` - Source IP address
-7. **Message** - Full event description
+1. The timestamp uses `(\w+\s+\d+\s+\d+:\d+:\d+)` and gives the date and time of the event.
+2. The host uses `(\S+)` and gives the name of the host.
+3. The process name uses `(\w+)` and gives the name of the process.
+4. The process ID uses `\[(\d+)\]` and gives the ID of the process.
+5. The user name uses `(\S+)` and identifies the user name.
+6. The IP address uses `from (\S+)` and gives the source IP address.
+7. The message gives the full description of the event.
 
-**Regex Patterns Implemented:**
+**Patterns That Sentinel Uses:**
 
 ```python
 # Failed password attempts
@@ -52,45 +54,45 @@ r'(permission denied|authentication failure|invalid user|illegal user)'
 r'^(\w+\s+\d+\s+\d+:\d+:\d+)\s+(\S+)\s+sudo:\s+(\S+)\s+:.*COMMAND=(.+)'
 ```
 
-### 3. Monitoring & Analysis ✓
+### 3. Monitor and Analysis ✓
 
-#### 3.1 Statistics / Counters (4 implemented)
+#### 3.1 Statistics and Counters (4 Items)
 
-1. **Top 10 IP addresses with failed login attempts**
-   - Tracks each IP's failure count
-   - Sorted by frequency (most suspicious first)
-   - Displays in security panel with color coding
+**Statistic 1: Failed Logins by IP Address - Top 10**
 
-2. **Failed vs successful login ratio per user**
-   - Calculates: `failed_logins / (failed_logins + successful_logins)`
-   - Tracks per-user authentication patterns
-   - Identifies targeted accounts
+Sentinel counts failed logins for each IP address. Sentinel sorts the IP addresses by count with the highest count first. The panel shows the list with colors.
 
-3. **Most common error types**
-   - "permission denied"
-   - "authentication failure"
-   - "invalid user"
-   - "illegal user"
-   - Frequency count per error type
+**Statistic 2: Failed Login Ratio Per User Name**
 
-4. **Top 10 users targeted by failed login attempts**
-   - Username → count mapping
-   - Identifies brute force targets
-   - Sorted by frequency
+Sentinel divides failed logins by total logins for each user name. The formula is `failed_logins / (failed_logins + successful_logins)`. Sentinel records login patterns for each user name. Sentinel finds user names under attack.
 
-#### 3.2 Time-based Metrics (2 implemented)
+**Statistic 3: Common Error Types**
 
-1. **Failed login attempts per 5-minute window**
-   - Sliding window analysis
-   - Configurable window size (default: 300 seconds)
-   - Used for brute force detection
+Sentinel counts each error type. Sentinel stores the count for each error type.
 
-2. **Error rate per 1-minute window**
-   - High-frequency error detection
-   - Configurable threshold (default: 10 errors/minute)
-   - Alerts on unusual activity spikes
+- "permission denied"
+- "authentication failure"
+- "invalid user"
+- "illegal user"
+
+**Statistic 4: Failed Logins by User Name - Top 10**
+
+Sentinel maps each user name to a failed login count. Sentinel sorts the user names by count. Sentinel finds targets of brute force.
+
+#### 3.2 Time Metrics (2 Items)
+
+**Metric 1: Failed Logins Per 5-Minute Window**
+
+Sentinel checks failed logins in a 5-minute window that moves in time. Sentinel uses a default of 300 seconds for the window size. Sentinel uses the result to find brute force.
+
+**Metric 2: Error Rate Per 1-Minute Window**
+
+Sentinel checks errors in a 1-minute window that moves in time. Sentinel uses a default threshold of 10 errors per minute. Sentinel sends an alert on a sudden rise in activity.
 
 **Implementation:**
+
+The code below cleans old events from the window.
+
 ```python
 # Windowed analysis with automatic cleanup
 cutoff_time = current_time - security_alerts_config['failed_login_window']
@@ -103,13 +105,11 @@ for ip in self._ip_failure_tracker.keys():
 
 ### 4. Alert Rule ✓
 
-**Implemented Alert Rules (3 total):**
+**Alert Rules That Sentinel Uses (3 Rules):**
 
 #### Alert 1: Brute Force Detection
-- **Condition:** >20 failed logins from same IP in 5 minutes
-- **Type:** Danger (RED)
-- **Message:** `"Possible brute force from {IP} ({count} attempts)"`
-- **Purpose:** Detect automated password attacks
+
+The condition is >20 failed logins from one IP address in 5 minutes. The type is danger with red color. The message is `"Possible brute force from {IP} ({count} attempts)"`. The purpose is to find automatic password attacks.
 
 ```python
 for ip, timestamps in self._ip_failure_tracker.items():
@@ -122,37 +122,38 @@ for ip, timestamps in self._ip_failure_tracker.items():
 ```
 
 #### Alert 2: High Error Rate
-- **Condition:** ≥10 failed logins in 1 minute
-- **Type:** Warning (YELLOW)
-- **Message:** `"{count} failed logins in 1 min"`
-- **Purpose:** Detect authentication storms or configuration issues
 
-#### Alert 3: Suspicious IP Activity
-- **Condition:** IP appears in multiple failed login attempts
-- **Type:** Warning (YELLOW)
-- **Purpose:** Track persistent attackers
+The condition is ≥10 failed logins in 1 minute. The type is warning with yellow color. The message is `"{count} failed logins in 1 min"`. The purpose is to find login storms or faults in the configuration file.
 
-**Alert Display:**
-- Integrated into Sentinel's footer alert system
-- Blinking colored text for visibility
-- Shows top 3 active alerts
-- Color-coded severity (red=danger, yellow=warning)
+#### Alert 3: Suspicious IP Address
+
+The condition is one IP address with many failed logins. The type is warning with yellow color. The purpose is to record attackers that persist.
+
+**How Sentinel Shows Alerts:**
+
+- Sentinel shows alerts in the footer alert area.
+- The text blinks with color for clear view.
+- Sentinel shows the top 3 active alerts.
+- Sentinel uses red for danger and yellow for warning.
 
 ### 5. Output Requirements ✓
 
-**Terminal Output Includes:**
+**The Terminal Shows:**
 
-1. **Total Parsed Lines** - `stats['total_parsed']`
-2. **Total Unparsed Lines** - `stats['total_unparsed']`
-3. **Failed Login Count** - Real-time counter
-4. **Successful Login Count** - Authentication success tracking
-5. **Failed/Success Ratio** - Percentage calculation
-6. **Top 10 Suspicious IPs** - With attempt counts
-7. **Top 10 Targeted Users** - With failure counts
-8. **Error Type Breakdown** - Categorized failures
-9. **Active Alerts** - Brute force warnings, high error rates
+1. Sentinel stores the total parsed lines in `stats['total_parsed']`.
+2. Sentinel stores the total unparsed lines in `stats['total_unparsed']`.
+3. Sentinel counts failed logins in real time.
+4. Sentinel counts successful logins.
+5. Sentinel gives the failed to success ratio as a percent.
+6. Sentinel lists the top 10 IP addresses with attempt counts.
+7. Sentinel lists the top 10 user names with failure counts.
+8. Sentinel groups failures by error category.
+9. Sentinel shows active alerts for brute force and high error rates.
 
 **Security Panel Display:**
+
+The panel below is an example.
+
 ```
 ┌─ power ──────────────────────┐
 │  5.2W ████████░░░░ RAPL      │
@@ -171,53 +172,57 @@ Footer: [BRUTE FORCE Possible brute force from 192.168.1.100 (23 attempts)]
 
 #### Architecture Integration
 
-**Following Sentinel's Patterns:**
+**How Sentinel Works:**
 
 1. **Data Collection Method**
-   - `get_security_logs()` at line 1178
-   - Follows same pattern as `get_proxy_stats()`
-   - 5-second cache to avoid excessive file reads
-   - Non-blocking, optimized performance
-
+   - The `get_security_logs()` function starts at line 1178.
+   - The function uses the same pattern as `get_proxy_stats()`.
+   - Sentinel caches results for 5 seconds to reduce file reads.
+   - The collector does not block the render loop.
 2. **State Management**
-   - Deque-based history: `self.failed_login_history`, `self.suspicious_ip_history`
-   - Windowed event tracking: `self._security_events`
-   - Per-IP failure tracker: `self._ip_failure_tracker`
-   - Automatic cleanup of old events
-
-3. **UI Rendering**
-   - Integrated into power box (column 3)
-   - Dynamic space allocation with Docker/K8s
-   - Responsive to terminal size
-   - Color-coded severity indicators
-
+   - The `self.failed_login_history` deque and the `self.suspicious_ip_history` deque store past events.
+   - The `self._security_events` list records events in the current window.
+   - The `self._ip_failure_tracker` dictionary records failures per IP address.
+   - Sentinel removes old events automatically.
+3. **How Sentinel Draws the Panel**
+   - Sentinel draws the results in the power box in column 3.
+   - Sentinel shares space with Docker and K8s.
+   - The panel adapts to the size of the terminal.
+   - Sentinel uses colors for severity.
 4. **Layout System**
-   - New "security" layout mode
-   - Emphasizes security panel (55% width in 3-column)
-   - Press `l` to cycle: default → cpu → network → docker → security → minimal
-
-5. **Alert Integration**
-   - Hooks into existing `check_alerts()` system
-   - Compatible with all themes
-   - Footer display with color-coded alerts
-   - Severity-based color coding
+   - Sentinel provides a "security" layout mode.
+   - The security panel uses 55% width in 3-column view.
+   - Press `l` to change the layout in this order:
+     - `default`
+     - `cpu`
+     - `network`
+     - `docker`
+     - `security`
+     - `minimal`
+5. **How Sentinel Sends Alerts**
+   - Sentinel calls `check_alerts()` for each alert.
+   - The alert works with all themes.
+   - The footer shows alerts with colors.
+   - The color reflects the severity.
 
 #### Performance Optimizations
 
-- **Background collector:** Log parsing runs on its own thread every 5
-  seconds; the render loop never waits on it (v0.6)
-- **Limited parsing:** Last 1000 lines per check (200 in light mode), read
-  directly with `deque(maxlen=N)` - no `tail` subprocess
-- **Windowed cleanup:** Automatic removal of old events, so memory stays flat
-  under sustained attack
-- **Efficient regex:** Pre-compiled patterns
-- **Degrades explicitly:** An unreadable log reports `no permission` with the
-  fix command in the diagnostics overlay (`d`) instead of showing an empty
-  panel
+- Background collector: The collector reads logs on a separate thread.
+  The collector runs each 5 seconds. The render loop never waits for the
+  collector (v0.6).
+- Limited read: Sentinel reads the last 1000 lines per check and 200 lines in light mode. Sentinel reads directly with `deque(maxlen=N)` and never calls `tail`.
+- Windowed cleanup: Sentinel deletes old events from the window. Memory use stays flat in a long attack.
+- Efficient patterns: Sentinel pre-compiles the patterns.
+- Clear failure: If Sentinel cannot read a log, the panel reports `no
+  permission`. The diagnostics overlay (`d`) shows the fix command. The
+  panel never shows an empty view.
 
 #### Configuration
 
-**Customizable Thresholds:**
+**Thresholds That You Can Change:**
+
+Edit the values in the configuration file.
+
 ```json
 "security_alerts": {
   "failed_login_threshold": 20,      // Brute force detection
@@ -229,45 +234,57 @@ Footer: [BRUTE FORCE Possible brute force from 192.168.1.100 (23 attempts)]
 ```
 
 **Log File Paths:**
-- Auto-detects Debian/Ubuntu (`auth.log`) vs RHEL/CentOS (`secure`)
-- Falls back to syslog if primary logs unavailable
-- Customizable via config file
 
-## Why This Implementation is Excellent
+- Sentinel selects `auth.log` on Debian and Ubuntu. Sentinel selects `secure` on RHEL and CentOS.
+- If the main log is absent, Sentinel uses syslog.
+- Change the paths in the configuration file.
 
-### 1. Real-World Applicability
-- Actual brute force detection used in production systems
-- Patterns match real attack scenarios (SSH scanning, credential stuffing)
-- Alert thresholds based on industry best practices
+## Implementation Assessment
 
-### 2. Educational Value
-- Demonstrates regex mastery with multiple complex patterns
-- Shows time-series analysis with sliding windows
-- Implements real security monitoring concepts
-- Professional-grade code structure
+### 1. Practical Use
 
-### 3. Technical Excellence
-- Clean integration with existing codebase
-- No performance impact on main monitoring
-- Follows established code patterns and conventions
-- Production-ready error handling
+- Sentinel finds real brute force attacks in live systems.
+- The patterns match real attacks on SSH with stolen passwords.
+- The thresholds use common industry values.
 
-### 4. Exceeds Requirements
-- 4 statistics instead of minimum 2
-- 2 time-based metrics instead of minimum 1
-- 3 alert rules instead of minimum 1
-- 7 extracted fields instead of minimum 3
-- Multi-log support (auth, secure, syslog)
+### 2. Study Value
 
-### 5. Professional Presentation
-- Integrated into polished TUI interface
-- Color-coded severity indicators
-- Real-time updates with minimal latency
-- Configurable thresholds and paths
+- The code shows regex with complex patterns.
+- The code shows time analysis with 5-minute and 1-minute windows.
+- The code applies real security monitor concepts.
+- The code follows a clear structure.
+
+### 3. Technical Points
+
+- The code joins the current Sentinel code without conflict.
+- The main monitor keeps the same speed.
+- The code uses the same patterns as the current code.
+- The code checks errors on all file reads.
+
+### 4. Beyond Minimum Requirements
+
+- Sentinel provides 4 statistics where the minimum is 2.
+- Sentinel provides 2 time metrics where the minimum is 1.
+- Sentinel provides 3 alert rules where the minimum is 1.
+- Sentinel extracts 7 fields where the minimum is 3.
+- Sentinel reads logs from more than one source:
+  - `auth`
+  - `secure`
+  - `syslog`
+
+### 5. Display
+
+- Sentinel shows results in the text interface.
+- Sentinel uses colors for severity.
+- Sentinel refreshes the view in real time.
+- Change the thresholds and paths in the configuration file.
 
 ## Usage Examples
 
 ### Basic Usage
+
+Start Sentinel with the commands below.
+
 ```bash
 # Run Sentinel with security monitoring
 sentinel
@@ -280,13 +297,14 @@ sentinel --init-config
 # Edit ~/.config/sentinel/config.json
 ```
 
-### Viewing Security Events
-1. Launch Sentinel: `sentinel`
-2. Press `l` to cycle to security layout
-3. Watch right column for security statistics
-4. Alerts appear in footer when thresholds exceeded
+### View Security Events
+
+Start Sentinel with `sentinel`. Press `l` to select the security layout. Watch the right column for security results. The footer shows alerts when an event exceeds a threshold.
 
 ### Configuration Example
+
+The example below sets a theme and thresholds.
+
 ```json
 {
   "theme": "nord",
@@ -302,51 +320,57 @@ sentinel --init-config
 }
 ```
 
-## Testing & Validation
+## Test and Validation
 
-### Log Parsing Tests
-- ✓ Failed password attempts (SSH)
-- ✓ Successful authentications
-- ✓ Invalid user attempts
-- ✓ Permission denied events
-- ✓ Sudo command tracking
+### Tests for Log Parse
+
+- ✓ The test checks failed password attempts with SSH.
+- ✓ The test checks successful logins.
+- ✓ The test checks invalid user names.
+- ✓ The test checks permission denied events.
+- ✓ The test checks sudo commands.
 
 ### Alert Tests
-- ✓ Brute force detection (>20 failures)
-- ✓ High error rate detection
-- ✓ Multi-IP tracking
-- ✓ Window-based cleanup
+
+- ✓ The test checks brute force with >20 failures.
+- ✓ The test checks high error rate.
+- ✓ The test checks records for more than one IP address.
+- ✓ The test checks removal of old events from the window.
 
 ### Integration Tests
-- ✓ No performance degradation
-- ✓ Works on Debian/Ubuntu/RHEL
-- ✓ Handles missing log files gracefully
-- ✓ Responsive to terminal resizing
+
+- ✓ The test confirms no loss in speed.
+- ✓ The test passes on these systems:
+  - Debian
+  - Ubuntu
+  - RHEL
+- ✓ Sentinel acts safely if a log is absent.
+- ✓ The panel adapts to a new terminal size.
 
 ## Code Quality
 
-- **Lines of Code:** ~200 for security feature
-- **Regex Patterns:** 4 comprehensive patterns
-- **Data Structures:** Efficient deques and dictionaries
-- **Error Handling:** Try/except on all file operations
-- **Documentation:** Inline comments explaining logic
-- **Style:** Consistent with existing codebase (PEP 8)
+- The security code uses ~200 lines.
+- Sentinel uses 4 regex patterns.
+- Sentinel uses deques and dictionaries.
+- Sentinel uses try and except on all file reads.
+- Inline notes describe the logic.
+- The style matches the current code and PEP 8.
 
 ## Conclusion
 
-This implementation provides a **production-ready security monitoring system** that:
-- Meets all school project requirements
-- Exceeds minimum specifications significantly
-- Integrates seamlessly with existing architecture
-- Demonstrates professional software engineering
-- Provides real security value
+This monitor provides a security monitor that:
 
-The feature feels native to Sentinel, as if it was always part of the design. It's not a "tacked-on school project" - it's a legitimate enhancement that makes Sentinel more valuable for system administrators and security-conscious users.
+- The monitor meets all school project requirements.
+- The monitor exceeds the minimum values.
+- The monitor joins the current Sentinel design.
+- The monitor shows clear software methods.
+- The monitor gives useful security facts.
+
+Sentinel includes the feature as a normal part of the design. The feature helps administrators who watch security events.
 
 ---
 
-**Author:** Biren Gil (with Claude Code integration)
+**Author:** Biren Gil (with Claude Code)
 **Date:** 2026-01-22
-**Version:** Introduced in Sentinel v0.5.0; collector architecture and
-explicit permission reporting added in v0.6.0
-**Project:** Linux Log Analyser & Monitoring (School Assignment)
+**Version:** Sentinel v0.5.0 includes this function. Sentinel v0.6.0 adds the collector and clear permission reports.
+**Project:** Linux Log Analyser and Monitor (School Assignment)

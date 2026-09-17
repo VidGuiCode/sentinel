@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
-"""Benchmark runner: spawn a tool, sample CPU/RSS/ctx-switches for N seconds, write JSON.
+"""Benchmark runner: start a tool, read CPU, RSS, and context changes for
+N seconds, write JSON.
 
 Usage: python3 bench/runner.py --name X --duration 30 --out /path/X.json [--tty] -- cmd args...
 
-With --tty the target runs attached to a freshly allocated pty (120x35,
-TERM=xterm-256color); at the end of the run 'q' is sent, then SIGTERM.
-Without --tty stdout/stderr go to /dev/null.
+With --tty the target runs on a new pty (120x35, TERM=xterm-256color).
+At the end of the run it receives 'q', then SIGTERM. Without --tty
+stdout and stderr go to /dev/null.
 
-Sampling every 0.5s:
-  - /proc/<pid>/stat   (utime+stime -> % of one core)
-  - /proc/<pid>/status (VmRSS, voluntary/nonvoluntary ctxt switches)
-  - container cgroup CPU (v2: /sys/fs/cgroup/cpu.stat usage_usec/nr_throttled/
-    throttled_usec; v1 fallback: /sys/fs/cgroup/cpuacct.usage) - captures
-    short-lived subprocess children that per-pid sampling misses.
+Read every 0.5s:
+  - /proc/<pid>/stat   (utime and stime give % of one core)
+  - /proc/<pid>/status (VmRSS, voluntary and nonvoluntary context changes)
+  - container cgroup CPU (v2: /sys/fs/cgroup/cpu.stat usage_usec,
+    nr_throttled, throttled_usec; v1 path: cpuacct.usage). This catches
+    short child calls that per-pid reads miss.
 
-The first 2 samples are discarded (startup transient).
+Drop the first 2 reads (startup jump).
 """
 
 import argparse
@@ -36,11 +37,12 @@ TERM_ROWS, TERM_COLS = 35, 120
 
 
 def read_proc_stat(pid):
-    """Return utime+stime in jiffies, or None if the process is gone."""
+    """Return utime and stime in jiffies. Return None when the call ends."""
     try:
         with open(f'/proc/{pid}/stat', 'r') as f:
             data = f.read()
-        # comm may contain spaces/parens; everything after the last ')' is fields 3+
+        # comm can hold spaces and parens. Fields after the last ')'
+        # start at field 3.
         rest = data[data.rindex(')') + 2:].split()
         utime = int(rest[11])  # field 14
         stime = int(rest[12])  # field 15
@@ -50,7 +52,7 @@ def read_proc_stat(pid):
 
 
 def read_proc_status(pid):
-    """Return (VmRSS kB, voluntary_ctxt_switches, nonvoluntary_ctxt_switches)."""
+    """Return (VmRSS in kB, voluntary changes, nonvoluntary changes)."""
     rss = vol = nonvol = None
     try:
         with open(f'/proc/{pid}/status', 'r') as f:
@@ -71,7 +73,7 @@ def detect_cgroup_v2():
 
 
 def read_cgroup_cpu(v2):
-    """Return (usage_usec, nr_throttled, throttled_usec); missing values are None."""
+    """Return (usage_usec, nr_throttled, throttled_usec). Use None when missing."""
     if v2:
         usage = nr_thr = thr_usec = None
         try:
@@ -118,7 +120,7 @@ def stats_block(values):
 
 
 def spawn_target(args, use_tty):
-    """Spawn the target command; return (Popen, master_fd or None)."""
+    """Start the target command. Return (Popen, master_fd or None)."""
     if not use_tty:
         proc = subprocess.Popen(
             args,
@@ -129,7 +131,7 @@ def spawn_target(args, use_tty):
         return proc, None
 
     master_fd, slave_fd = os.openpty()
-    # Set window size so curses apps render a realistic layout
+    # Set the window size. Then curses tools draw a true layout
     fcntl.ioctl(slave_fd, termios.TIOCSWINSZ,
                 struct.pack('HHHH', TERM_ROWS, TERM_COLS, 0, 0))
 
@@ -155,7 +157,7 @@ def spawn_target(args, use_tty):
 
 
 def drain_pty(master_fd, timeout):
-    """Read and discard pty output for up to `timeout` seconds."""
+    """Read and drop pty output for up to `timeout` seconds."""
     if master_fd is None:
         time.sleep(timeout)
         return
@@ -175,7 +177,8 @@ def drain_pty(master_fd, timeout):
 
 
 def stop_target(proc, master_fd):
-    """Send 'q', wait briefly, then SIGTERM (process group), then SIGKILL."""
+    """Send 'q', wait a short time, then send SIGTERM (call group),
+    then send SIGKILL."""
     if master_fd is not None and proc.poll() is None:
         try:
             os.write(master_fd, b'q')
@@ -267,14 +270,14 @@ def main():
             except OSError:
                 pass
 
-    # Discard startup transient
+    # Drop the startup jump
     kept = samples[DISCARD_SAMPLES:]
 
     cpu_vals = [s['cpu_percent'] for s in kept]
     cg_vals = [s['cgroup_cpu_percent'] for s in kept if s['cgroup_cpu_percent'] is not None]
     rss_vals = [s['rss_kb'] for s in kept if s['rss_kb'] is not None]
 
-    # Context switches per second from first/last kept sample counters
+    # Count context changes per second from the first and last kept reads
     ctx_vol = ctx_nonvol = None
     ctx_samples = [s for s in kept if s['voluntary_ctx'] is not None]
     if len(ctx_samples) >= 2:

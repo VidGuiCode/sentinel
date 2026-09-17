@@ -4,7 +4,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 btop htop curl procps ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Runner lives inside the image so interpreter startup never has to list
+# Keep the runner in the image, so interpreter start never lists
 # the bind-mounted (host-synced) bench/ directory.
 COPY bench/runner.py /opt/bench/runner.py
 RUN mkdir -p /results

@@ -1,26 +1,26 @@
 #!/usr/bin/env bash
-# Baseline benchmark orchestration (host-side, Git Bash).
-# Builds the bench image once, then runs each tool under simulated
-# low-end hardware profiles inside Docker containers.
+# Baseline benchmark plan (host side, Git Bash).
+# Build the bench image once. Then run each tool under a weak
+# hardware profile in a Docker container.
 #
-# Results are written container-local (/results) and copied out with
-# `docker cp` after each run - nothing is written into the (possibly
-# cloud-synced) repo mount while containers run, which avoids transient
-# share errors on Windows/Docker Desktop.
+# Results stay in the container (/results). Copy them out with
+# `docker cp` after each run. Write nothing to the repo mount
+# (it can be cloud-synced) while containers run. This skips
+# transient share errors on Windows and Docker Desktop.
 #
 # Usage:  ./bench/run_profiles.sh [results-subdir]
 # Env:    DURATION=30 (seconds per run)
 set -euo pipefail
 
-# Git Bash mangles container-side absolute paths (e.g. /sentinel/...) into
-# Windows paths unless path conversion is disabled.
+# Git Bash changes container-side absolute paths (example /sentinel/...)
+# to Windows paths. Turn that change off.
 export MSYS_NO_PATHCONV=1
 
 IMAGE=sentinel-bench
 DURATION=${DURATION:-30}
-# Which sentinel source file to measure. Point this at a checkout of an older
-# revision to produce before/after numbers in the same session, under the same
-# host load - results from different sessions are not comparable.
+# Which sentinel source file to test. Point this at a checkout of an old
+# revision to get before and after numbers in one session, under the
+# same host load. Numbers from two sessions never compare.
 SENTINEL_SCRIPT=${SENTINEL_SCRIPT:-sentinel-monitor.py}
 TOOLS=${TOOLS:-"sentinel-tui sentinel-service btop htop"}
 SUBDIR=${1:-baseline}
@@ -29,7 +29,7 @@ REPO_WIN="$(pwd -W)"
 
 mkdir -p "$RESULTS_DIR"
 
-echo "==> Building bench image (if needed)"
+echo "==> Build the bench image (skip when present)"
 docker build -q -t "$IMAGE" -f bench/Dockerfile.bench . > /dev/null
 
 run_one() {
@@ -49,11 +49,11 @@ run_one() {
     envargs=(-e "SENTINEL_PROFILE=/results/profile-${name}.jsonl")
   fi
 
-  # Under Docker Desktop for Windows a constrained container occasionally
-  # dies during interpreter start-up (an import fails reading from the
-  # bind-mounted checkout) and the run yields 0 samples. That is a host
-  # artifact, not a property of the tool under test, so retry rather than
-  # publish a hole in the results table.
+  # Under Docker Desktop for Windows a small container at times
+  # stops while the interpreter starts (an import fails to read from
+  # the bind-mounted checkout). Then the run gives 0 reads. That is a
+  # host fault, not a mark of the tool. So try again. Do not print
+  # a gap in the results table.
   local attempt
   for attempt in 1 2 3; do
     echo "==> ${name} (cpus=${cpus} mem=${mem} duration=${DURATION}s, attempt ${attempt})"
@@ -88,5 +88,5 @@ for profile in pi3 pi4; do
   done
 done
 
-echo "==> Done. Results in ${RESULTS_DIR}/"
+echo "==> Done. Results are in ${RESULTS_DIR}/"
 python bench/summarize.py "$RESULTS_DIR" 2>/dev/null || true

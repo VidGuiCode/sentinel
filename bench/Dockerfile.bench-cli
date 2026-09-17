@@ -1,5 +1,5 @@
-# Variant of the bench image with the Docker CLI installed, used to
-# measure Sentinel's docker-CLI subprocess code path with the socket present.
+# Bench image form with the Docker CLI in it. Use it to test
+# the Sentinel Docker-CLI call path with the socket present.
 FROM sentinel-bench
 RUN apt-get update \
  && apt-get install -y --no-install-recommends docker.io \

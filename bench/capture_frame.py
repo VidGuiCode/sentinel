@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
-"""Capture a rendered Sentinel frame from a real pty.
+"""Capture a drawn Sentinel frame from a true pty.
 
-Sentinel is a curses app: it draws nothing unless stdout is a terminal with a
-non-zero window size. `docker run -t` under a non-interactive shell provides a
-pty with size 0x0, so naive smoke tests capture an empty screen and wrongly
-look like a pass.
+Sentinel is a curses tool: it draws nothing unless stdout is a terminal
+with a size above zero. `docker run -t` under a shell with no terminal
+gives a pty of size 0x0. So plain smoke tests catch an empty screen
+and wrongly read it as a pass.
 
-This allocates a pty with an explicit size, runs the target, drains output for
-a few seconds, and replays the ANSI stream into a plain-text grid so the final
-visible frame can be asserted on - used both for render smoke tests and for
-verifying that permission-degraded panels show an explanation instead of going
-blank.
+This code makes a pty with a set size, runs the target, drains output
+for some seconds, and turns the ANSI stream into a plain text grid.
+Then the last visible frame can be checked. Use it for draw smoke
+tests and to check that permission-cut panels show a reason, not blank.
 
-Limitation: the replay does not model terminal scrolling, so the captured grid
-can sit one row off from what the application addressed, and rows that changed
-across frames may show overlapping remnants. Assert on *content presence*
-("does this panel explain why it is empty?"), not on exact row/column
-positions.
+Limit: the replay skips terminal scroll. So the caught grid can sit one
+row off from what the tool wrote. Rows that changed across frames can
+show old parts. Check that content is present ("does this panel state
+why it is empty?"). Do not check exact row and column spots.
 
 Usage:
     python3 bench/capture_frame.py [--rows 45] [--cols 160] [--duration 8]
@@ -34,12 +32,12 @@ import sys
 import termios
 import time
 
-# Enough of the ANSI/VT100 repertoire to replay a curses screen.
+# Cover enough ANSI/VT100 codes to replay a curses screen.
 CSI_RE = re.compile(rb'\x1b\[([0-9;?]*)([a-zA-Z])')
 
 
 class Screen:
-    """Minimal VT100 grid: absolute/relative cursor moves, erase, and text."""
+    """Small VT100 grid: cursor moves, erase codes, and text."""
 
     def __init__(self, rows, cols):
         self.rows = rows
@@ -76,8 +74,8 @@ class Screen:
             self.grid[self.cy] = [' '] * self.cols
 
     def feed(self, data):
-        # An escape sequence can be split across two pty reads; carry the
-        # incomplete tail over instead of rendering it as literal text.
+        # An escape code can split across two pty reads. Hold the cut
+        # tail. Do not draw it as text.
         data = self._pending + data
         self._pending = b''
         i = 0
@@ -97,7 +95,7 @@ class Screen:
                 if len(tail) >= 3 and tail[1:2] in (b'(', b')'):
                     i += 3
                     continue
-                # Possibly-incomplete sequence at the buffer edge: hold it.
+                # A cut code at the read edge: hold it.
                 if len(tail) < 8 and (len(tail) < 2 or tail[1:2] in (b'[', b'(', b')')):
                     self._pending = tail
                     return
@@ -110,7 +108,7 @@ class Screen:
             elif b == b'\b':
                 self.cx = max(0, self.cx - 1)
             elif b >= b' ':
-                # Decode one UTF-8 codepoint (box-drawing/braille glyphs).
+                # Decode one UTF-8 shape (box and braille glyphs).
                 length = 1
                 c = b[0]
                 if c >= 0xF0:
@@ -147,7 +145,7 @@ class Screen:
             self._erase_display(nums[0] if nums else 0)
         elif final == b'K':
             self._erase_line(nums[0] if nums else 0)
-        # SGR/colour (m) and mode set/reset (h/l) do not affect the text grid.
+        # SGR/color (m) and mode set/reset (h/l) leave the text grid alone.
 
     def text(self):
         return '\n'.join(''.join(row).rstrip() for row in self.grid)
@@ -160,8 +158,8 @@ def main():
     parser.add_argument('--duration', type=float, default=8)
     parser.add_argument('--out', default=None)
     parser.add_argument('--keys', default='',
-                        help='keystrokes to send once the UI has settled, '
-                             'e.g. "d" to open the diagnostics overlay')
+                        help='keys to send after the UI settles, '
+                             'example: "d" opens the diagnostics overlay')
     parser.add_argument('--keys-at', type=float, default=None,
                         help='seconds into the run to send --keys '
                              '(default: 60%% of duration)')
@@ -216,7 +214,7 @@ def main():
             break
         screen.feed(chunk)
 
-    # Quit cleanly so curses restores the terminal, then reap.
+    # Quit clean, so curses restores the terminal. Then wait for the end.
     try:
         os.write(master_fd, b'q')
         time.sleep(0.4)
@@ -245,7 +243,7 @@ def main():
         with open(args.out, 'w', encoding='utf-8') as f:
             f.write(out + '\n')
     sys.stdout.write(out + '\n')
-    # A frame with almost no glyphs means the app never painted.
+    # A frame with almost no shapes means the tool never drew.
     non_blank = sum(1 for line in out.splitlines() if line.strip())
     sys.stderr.write(f'\n[capture_frame] non-blank lines: {non_blank}\n')
     return 0 if non_blank > 3 else 1

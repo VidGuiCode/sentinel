@@ -12,10 +12,10 @@ RestartSec=10
 StandardOutput=journal
 StandardError=journal
 
-# Performance: Nice value for low priority
+# Low priority: run Sentinel after other calls
 Nice=10
 
-# Optional: Run as specific user
+# Optional: run as a set user
 # User=sentinel
 # Group=sentinel
 

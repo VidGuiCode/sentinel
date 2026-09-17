@@ -1,15 +1,15 @@
 #!/bin/bash
-# Sentinel - Universal Linux System Monitor
-# Multi-distro Installation Script
+# Sentinel: Linux System Monitor
+# Install Script for many Linux forms
 #
-# Also the upgrade path: re-running this replaces /usr/local/bin/sentinel and
-# never touches your config (~/.config/sentinel/config.json).
+# Use it to update too: run it again. It replaces /usr/local/bin/sentinel.
+# It never touches your configuration file (~/.config/sentinel/config.json).
 
 set -e
 
-# The version is read from the binary that actually gets installed, never
-# hardcoded here - a literal in this script silently goes stale every release
-# and then reports the wrong version at the end of a successful install.
+# Read the version from the file that gets installed, never write it here.
+# A fixed value in this script goes stale at each release. Then it prints
+# a wrong version at the end of a good install.
 VERSION=""
 
 # Colors
@@ -21,7 +21,7 @@ NC='\033[0m'
 
 BOX_W=47
 
-# Pad a line to the box width so the borders line up whatever the text length.
+# Fill a line to the box width, so edges line up for all text lengths.
 box_line() {
     local text="$1"
     local len=${#text}
@@ -61,13 +61,13 @@ detect_distro() {
 
 install_deps() {
     local distro=$1
-    echo -e "${YELLOW}[1/4] Installing dependencies for ${distro}...${NC}"
+    echo -e "${YELLOW}[1/4] Install packages for ${distro}...${NC}"
     
     case $distro in
         ubuntu|debian|pop|linuxmint|raspbian)
             apt-get update -qq 2>/dev/null || true
             apt-get install -y python3 curl 2>/dev/null || true
-            # Optional: lm-sensors for temperature
+            # Optional: lm-sensors for temperature reads
             apt-get install -y lm-sensors 2>/dev/null || echo "  Note: lm-sensors optional"
             ;;
         fedora|rhel|centos|rocky|alma)
@@ -84,13 +84,13 @@ install_deps() {
             apk add python3 curl lm-sensors 2>/dev/null || true
             ;;
         *)
-            echo -e "${YELLOW}  Unknown distro, assuming Python3 is installed${NC}"
+            echo -e "${YELLOW}  Unknown Linux form, Sentinel needs Python3${NC}"
             ;;
     esac
-    echo -e "${GREEN}  ✓ Dependencies ready${NC}"
+    echo -e "${GREEN}  Done: packages ready${NC}"
 }
 
-# Check for root
+# Need root rights
 if [ "$EUID" -ne 0 ]; then
     echo -e "${RED}Please run with sudo${NC}"
     echo "  sudo bash $0"
@@ -99,49 +99,49 @@ fi
 
 print_header
 
-# Detect distro
+# Find the Linux form
 DISTRO=$(detect_distro)
 echo -e "Detected: ${CYAN}${DISTRO}${NC}"
 
-# Detect script directory (if run locally)
+# Find the script directory (for a local run)
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" 2>/dev/null )" 2>/dev/null && pwd )"
 GITHUB_RAW="https://raw.githubusercontent.com/VidGuiCode/sentinel/main"
 
-# Install dependencies
+# Install the needed packages
 install_deps "$DISTRO"
 
-echo -e "${YELLOW}[2/4] Configuring sensors...${NC}"
-# Auto-detect sensors (non-interactive, silent)
+echo -e "${YELLOW}[2/4] Set up sensors...${NC}"
+# Find sensors (no questions, no output)
 if command -v sensors-detect &> /dev/null; then
     yes | sensors-detect >/dev/null 2>&1 || sensors-detect --auto >/dev/null 2>&1 || true
 fi
-echo -e "${GREEN}  ✓ Sensor detection complete${NC}"
+echo -e "${GREEN}  Done: sensor check complete${NC}"
 
-echo -e "${YELLOW}[3/4] Installing Sentinel...${NC}"
-# Record what was there before, so an upgrade can report old -> new.
+echo -e "${YELLOW}[3/4] Install Sentinel...${NC}"
+# Read the old version first, so an update can print old to new.
 PREV_VERSION=""
 if [ -x /usr/local/bin/sentinel ]; then
     PREV_VERSION=$(installed_version)
 fi
-# Try local file first, then download from GitHub
+# Take the local file first, else fetch it from GitHub
 if [ -f "$SCRIPT_DIR/sentinel-monitor.py" ]; then
     cp "$SCRIPT_DIR/sentinel-monitor.py" /usr/local/bin/sentinel
 else
-    echo "  Downloading from GitHub..."
+    echo "  Fetch from GitHub..."
     curl -sL "$GITHUB_RAW/sentinel-monitor.py" -o /usr/local/bin/sentinel
 fi
 chmod 755 /usr/local/bin/sentinel
 
 # Create short alias
 ln -sf /usr/local/bin/sentinel /usr/local/bin/sen
-echo -e "${GREEN}  ✓ Installed to /usr/local/bin/sentinel${NC}"
+echo -e "${GREEN}  Done: installed to /usr/local/bin/sentinel${NC}"
 
-echo -e "${YELLOW}[4/4] Setting up shell aliases...${NC}"
-# Detect user who ran sudo
+echo -e "${YELLOW}[4/4] Set up shell aliases...${NC}"
+# Find the user who ran sudo
 REAL_USER="${SUDO_USER:-$USER}"
 REAL_HOME=$(eval echo ~$REAL_USER)
 
-# Add to user's bashrc if not already present
+# Add the lines to user bashrc when missing
 if ! grep -q "alias sentinel=" "$REAL_HOME/.bashrc" 2>/dev/null; then
     echo "" >> "$REAL_HOME/.bashrc"
     echo "# Sentinel System Monitor" >> "$REAL_HOME/.bashrc"
@@ -149,7 +149,7 @@ if ! grep -q "alias sentinel=" "$REAL_HOME/.bashrc" 2>/dev/null; then
     echo "alias sen='/usr/local/bin/sentinel'" >> "$REAL_HOME/.bashrc"
     chown $REAL_USER:$REAL_USER "$REAL_HOME/.bashrc"
 fi
-echo -e "${GREEN}  ✓ Aliases configured${NC}"
+echo -e "${GREEN}  Done: aliases set${NC}"
 
 VERSION=$(installed_version)
 [ -z "$VERSION" ] && VERSION="(unknown)"
@@ -157,44 +157,44 @@ VERSION=$(installed_version)
 echo ""
 echo -e "${GREEN}╔═══════════════════════════════════════════════╗${NC}"
 if [ -n "$PREV_VERSION" ] && [ "$PREV_VERSION" != "$VERSION" ]; then
-    echo -e "${GREEN}$(box_line "  ✓ Sentinel updated: v${PREV_VERSION} -> v${VERSION}")${NC}"
+    echo -e "${GREEN}$(box_line "  Sentinel updated: v${PREV_VERSION} to v${VERSION}")${NC}"
 else
-    echo -e "${GREEN}$(box_line "  ✓ Sentinel v${VERSION} installed successfully")${NC}"
+    echo -e "${GREEN}$(box_line "  Sentinel v${VERSION} installed")${NC}"
 fi
 echo -e "${GREEN}╚═══════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "${CYAN}Usage:${NC}"
-echo "  sentinel      - Launch Sentinel monitor"
+echo "  sentinel      - Open the Sentinel panel"
 echo "  sen           - Short alias"
 echo ""
 echo -e "${CYAN}Controls:${NC}"
 echo "  q - Quit       r - Refresh    t - Theme"
-echo "  l - Layout     h - Help       i - Check IP"
-echo "  d - Diagnostics (why a panel is empty + how to fix)"
-echo "  +/- Adjust refresh rate (1-10s)"
+echo "  l - Layout     h - Help       i - Refresh public IP"
+echo "  d - Diagnostics (why a panel is empty and how to fix it)"
+echo "  +/- Set the refresh rate (1-10s)"
 echo ""
-echo -e "${CYAN}v0.6 New Features:${NC}"
-echo "  - Non-blocking UI: slow collectors run in the background"
-echo "  - No subprocesses on the render path (Docker via socket API)"
-echo "  - Repaints only when something changed; far fewer wakeups"
-echo "  - Panels say why they are empty - press d for the fix command"
-echo "  - Permissions re-checked every 30s, no restart needed"
-echo "  - Lighter --light mode (~21MB vs ~31MB RSS)"
+echo -e "${CYAN}v0.6 New:${NC}"
+echo "  - Panel never waits: slow collectors run off the UI thread"
+echo "  - No calls on the draw path (Docker talks through the socket API)"
+echo "  - Repaint only on change, far fewer wakeups"
+echo "  - Panels state why they are empty, press d for the fix command"
+echo "  - Rights re-checked every 30s, no restart needed"
+echo "  - Light --light mode (near 21MB, not 31MB RSS)"
 echo ""
-echo -e "${CYAN}Previous Features:${NC}"
-echo "  - Security log monitoring, brute force detection"
-echo "  - 6 layout modes: default, cpu, network, docker, security, minimal"
-echo "  - Docker/K8s monitoring, proxy traffic stats"
-echo "  - Adjustable refresh rate, 5 color themes"
+echo -e "${CYAN}Past Features:${NC}"
+echo "  - Security log reads, brute force find"
+echo "  - 6 views: default, cpu, network, docker, security, minimal"
+echo "  - Docker and Kubernetes data, proxy traffic numbers"
+echo "  - Set the refresh rate, 5 color themes"
 echo ""
 echo -e "${CYAN}Options:${NC}"
-echo "  sentinel --light         Low-memory mode (recommended on Raspberry Pi)"
-echo "  sentinel --theme nord    Use Nord theme"
-echo "  sentinel --init-config   Create config file"
+echo "  sentinel --light         Small memory mode (use it on Raspberry Pi)"
+echo "  sentinel --theme nord    Set the Nord theme"
+echo "  sentinel --init-config   Create the configuration file"
 echo "  sentinel --service       Headless mode"
-echo "  sentinel --host hosts.json  Fleet overview over SSH"
+echo "  sentinel --host hosts.json  Fleet view of many hosts through SSH"
 echo ""
-echo -e "${CYAN}To update later:${NC} re-run this installer (your config is kept)"
+echo -e "${CYAN}To update later:${NC} run this installer again (it keeps your configuration file)"
 echo ""
 echo -e "Try it now: ${GREEN}sentinel${NC}"
 echo ""

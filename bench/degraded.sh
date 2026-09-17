@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Graceful-degradation verification.
+# Cut-capability check.
 #
-# Runs Sentinel under containers that are deliberately missing permissions or
-# resources and asserts that the UI still renders and *explains* what is
-# unavailable, instead of crashing or showing a silently blank panel.
+# Run Sentinel in containers that miss rights or resources. Check that
+# the panel still draws and states what is missing. It must not stop
+# and must not show a blank panel with no reason.
 #
-# Each scenario checks two things:
-#   1. the frame is not blank (the TUI painted at all)
-#   2. the expected explanation text is present, either in a panel or in the
-#      diagnostics overlay (opened by sending "d")
+# Each case checks two things:
+#   1. the frame is not blank (the panel drew at all)
+#   2. the right reason text is present, in a panel or in the
+#      diagnostics overlay (open it by send of "d")
 #
 # Usage:  ./bench/degraded.sh
 set -uo pipefail
@@ -18,7 +18,7 @@ IMAGE=sentinel-degraded
 PASS=0
 FAIL=0
 
-# scenario <name> <expect-regex> <docker-run-args...>
+# case <name> <expect-regex> <docker-run-args...>
 scenario() {
   local name=$1 expect=$2; shift 2
   local out
@@ -28,40 +28,40 @@ scenario() {
   local nonblank
   nonblank=$(printf '%s' "$out" | grep -c '[│┌└]')
   if [ "$nonblank" -lt 5 ]; then
-    echo "FAIL  ${name}: UI did not render (${nonblank} frame lines)"
+    echo "FAIL  ${name}: panel did not draw (${nonblank} frame lines)"
     printf '%s\n' "$out" | tail -6 | sed 's/^/      | /'
     FAIL=$((FAIL+1)); return
   fi
   if printf '%s' "$out" | grep -qiE "$expect"; then
-    echo "PASS  ${name}: rendered + explained (/${expect}/)"
+    echo "PASS  ${name}: drew and stated the reason (/${expect}/)"
     PASS=$((PASS+1))
   else
-    echo "FAIL  ${name}: rendered but no explanation matching /${expect}/"
+    echo "FAIL  ${name}: drew but gave no reason that fits /${expect}/"
     FAIL=$((FAIL+1))
   fi
 }
 
-echo "==> Building degradation image"
+echo "==> Build the cut-capability image"
 docker build -q -t sentinel-bench -f bench/Dockerfile.bench . > /dev/null
 docker build -q -t "$IMAGE" -f bench/Dockerfile.degraded . > /dev/null
 
-# 1. No docker socket at all (the common Raspberry Pi case).
+# 1. No Docker socket at all (the usual Raspberry Pi case).
 scenario "no-docker-socket" "socket missing|not installed"
 
-# 2. Docker socket present but unreadable: mounted, process runs unprivileged.
-#    Must report a permission problem, not "not installed".
+# 2. Docker socket found but unreadable: mount it, run with no rights.
+#    State a permission fault, not "not installed".
 scenario "docker-socket-no-perm" "no permission|failed|socket missing" \
   --user 65534:65534 -v /var/run/docker.sock:/var/run/docker.sock:ro
 
-# 3. Unreadable /var/log: security + proxy log collectors must degrade.
+# 3. Unreadable /var/log: security and proxy log collectors must cut back.
 scenario "unreadable-var-log" "security|proxy" \
   --user 65534:65534 -v /dev/null:/var/log/auth.log:ro
 
-# 4. Dropped capabilities + read-only root filesystem.
+# 4. Dropped rights and read-only root file system.
 scenario "dropped-caps-readonly" "not installed|no permission|socket missing" \
   --cap-drop=ALL --read-only --tmpfs /tmp
 
-# 5. Tightest device profile, to be sure degradation is not an OOM crash.
+# 5. Smallest device profile, to prove cutback is not a memory stop.
 scenario "pi3-limits" "not installed|no permission|socket missing" \
   --cpus=0.5 --memory=256m
 
