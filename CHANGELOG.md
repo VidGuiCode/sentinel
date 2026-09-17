@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased - v0.6.2 service health checks (in progress)
+## v0.6.2 - service health checks
 
 A container that runs is not a service that works.
 Sentinel adds `health_checks` for each container.

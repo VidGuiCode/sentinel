@@ -5,7 +5,7 @@ Sentinel monitors Linux hosts in the terminal. It shows live graphs, data from c
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.6+-green.svg)
 ![Platform](https://img.shields.io/badge/platform-linux-lightgrey.svg)
-![Version](https://img.shields.io/badge/version-0.6.0-cyan.svg)
+![Version](https://img.shields.io/badge/version-0.6.2-cyan.svg)
 
 ## Quick start
 
