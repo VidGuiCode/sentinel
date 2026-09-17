@@ -275,7 +275,7 @@ Create the configuration file with `sentinel --init-config`:
 }
 ```
 
-A container can run while the app in it dies. Sentinel puts a green `●` (healthy) or a red `✗` (down) near the name of each container that runs in the Docker panel. A listener port that fails to connect raises a `PORT CLOSED` alert. A container with a failed health check raises a `SERVICE DOWN` alert. The `sentinel --dump` output and the fleet table also hold `health_healthy`, `health_down`, and `health_listeners`.
+A container can run while the app in it dies. Sentinel puts a green `●` (healthy) or a red `✗` (down) near the name of each container that runs in the Docker panel. A check name can be short: `web` matches a container named `project-web-1`. A full name always wins over a short name. A listener port that fails to connect raises a `PORT CLOSED` alert. A container with a failed health check raises a `SERVICE DOWN` alert. The `sentinel --dump` output and the fleet table also hold `health_healthy`, `health_down`, and `health_listeners`. Light mode skips HTTP checks (they need `urllib`, which costs ~10MB). TCP listener checks still run in light mode.
 
 ### Systemd Service
 

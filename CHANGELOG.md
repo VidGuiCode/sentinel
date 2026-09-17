@@ -17,6 +17,10 @@ Failures trigger `SERVICE DOWN` and `PORT CLOSED` alerts.
 The diagnostics overlay shows failures (`d`, `H` header letter).
 `sentinel --dump` includes failures.
 The fleet table includes failures.
+A check name can be short (`web` matches `project-web-1`).
+A full name always wins.
+Light mode skips HTTP checks (they need `urllib`).
+TCP listener checks still run in light mode.
 
 ## v0.6.1 - multi-host fleet over SSH
 

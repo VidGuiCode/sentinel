@@ -660,6 +660,14 @@ class SentinelMonitor:
                                      self._collect_update_check)
         self._register_collector('probes', 30, self._collect_probes)
         self._register_collector('ssid', 60, self._collect_ssid)
+        if self._light_mode and self.health_checks:
+            # Light mode keeps its ~10MB promise: no urllib, so HTTP
+            # health checks stay off. The collector still runs for TCP
+            # listeners (socket is always loaded) and reports the skip.
+            self._set_feature_status(
+                'health', 'unavailable',
+                'HTTP checks need urllib (disabled in light mode)',
+                'run without --light, or set light_mode: false in the config')
         self._register_collector('health', 30, self._collect_health)
         for collector in self.collectors.values():
             collector.start()
@@ -1771,11 +1779,23 @@ class SentinelMonitor:
         update_data() merges the per-container map into the Docker data.
         Listeners land under their own 'health' key.
         """
-        import urllib.request
+        import sys
         import urllib.error
         checks = self.health_checks if isinstance(self.health_checks, dict) else {}
+        skipped = []
+        if getattr(self, '_light_mode', False) and checks \
+                and 'urllib.request' not in sys.modules:
+            # Light mode never loads urllib (~10MB RSS promise). Skip the
+            # HTTP checks; TCP listeners below still run on plain socket.
+            # The skipped names stay visible in 'unconfigured' detail.
+            skipped = sorted(checks)
+            checks = {}
+        else:
+            import urllib.request
         ports = self.listeners if isinstance(self.listeners, list) else []
-        per_container = {}
+        per_container = {name: {'state': 'unconfigured',
+                                'detail': 'HTTP checks off in light mode'}
+                         for name in skipped}
         for name, spec in checks.items():
             if not isinstance(spec, dict):
                 per_container[name] = {'state': 'down', 'detail': 'not a {url, expect} object'}
@@ -2799,7 +2819,17 @@ class SentinelMonitor:
         if health:
             per_container = health.get('containers', {})
             for container in docker.get('containers', []):
-                entry = per_container.get(container.get('name'))
+                name = container.get('name') or ''
+                entry = per_container.get(name)
+                if entry is None:
+                    # Fall back to a substring hit: a check named 'web'
+                    # matches container 'project-web-1'. Exact hits win,
+                    # so two checks can still split a shared substring
+                    # by using the full name for one of them.
+                    for key, candidate in per_container.items():
+                        if key and key in name:
+                            entry = candidate
+                            break
                 container['health'] = entry['state'] if entry else 'unconfigured'
                 container['health_detail'] = entry['detail'] if entry else ''
 
