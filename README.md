@@ -5,7 +5,7 @@ Sentinel monitors Linux hosts in the terminal. It shows live graphs, data from c
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.6+-green.svg)
 ![Platform](https://img.shields.io/badge/platform-linux-lightgrey.svg)
-![Version](https://img.shields.io/badge/version-0.6.2-cyan.svg)
+![Version](https://img.shields.io/badge/version-0.6.3-cyan.svg)
 
 ## Quick start
 
@@ -207,8 +207,26 @@ Press these keys in the terminal.
 | `h` | Toggle help overlay |
 | `d` | Diagnostics / Permission check |
 | `i` | Check public IP |
+| `j`/`k` | Move Docker cursor (arrows act the same) |
+| `x` | Restart container at cursor (asks first) |
+| `s` | Stop container at cursor (asks first) |
+| `k` | Type PID, then kill it (asks first) |
+| `u` | Check for OS updates (count shows in header) |
+| `a` | Apply OS updates (asks first, needs `u` first) |
+| `p` | Ping a host (type host, see latency) |
 | `+` | Faster refresh (min 1s) |
 | `-` | Slower refresh (max 10s) |
+
+Each destructive key asks first.
+Press `y` to run, `n` or `Esc` to cancel.
+`x` restarts the marked container.
+`s` stops the marked container.
+`k` opens a PID prompt, then asks.
+`a` opens an update prompt, then asks.
+`u` only counts updates.
+`u` never installs updates.
+`p` only pings.
+`p` never changes the host.
 
 ### Permission state
 

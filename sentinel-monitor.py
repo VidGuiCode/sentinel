@@ -6,6 +6,11 @@ A single-screen TUI dashboard to monitor a home lab in real time
 Features:
 - Single-screen adaptive layout (fits any terminal size)
 - Layout modes: default, cpu, network, docker, minimal (press L)
+- Docker list with cursor (press j/k, or arrow keys)
+- Docker restart/stop on the cursor row (press x/s, confirm first)
+- Kill a process by PID (press k, confirm first)
+- OS update check and apply (press u/a, confirm apply first)
+- Ping a host (press p, no confirm needed)
 - Docker and Kubernetes container lists (they fit the free space)
 - Docker volumes with names and sizes
 - Energy use (RAPL for desktops, battery for laptops)
@@ -24,6 +29,13 @@ Controls:
 - l: Cycle layouts (default, cpu, network, docker, minimal)
 - h: Toggle help overlay
 - i: Refresh public IP
+- j/k or arrows: Move the Docker cursor
+- x: Restart the container under the cursor (asks first)
+- s: Stop the container under the cursor (asks first)
+- k: Type a PID, then kill it (asks first)
+- u: Check for OS updates (shows the count in the header)
+- a: Apply OS updates (asks first, needs the u check first)
+- p: Ping a host (type the host, see latency)
 - +/-: Set the refresh rate (faster/slower)
 
 GitHub: https://github.com/VidGuiCode/sentinel
@@ -42,6 +54,7 @@ import subprocess
 import threading
 import shutil
 import shlex
+import signal
 # urllib.request (~2MB RSS) and http.client (~8MB, they load email.parser)
 # load at first use only: the public-IP collector, the update collector,
 # and the Docker socket client. A Pi with no Docker and public_ip_check
@@ -50,7 +63,7 @@ from datetime import datetime, timedelta
 from collections import deque
 from pathlib import Path
 
-VERSION = "0.6.2"
+VERSION = "0.6.3"
 
 # Profile record (active only when SENTINEL_PROFILE holds a path)
 _PROFILE_PATH = os.environ.get('SENTINEL_PROFILE')
@@ -242,6 +255,134 @@ class DockerError(Exception):
         self.detail = detail
 
 
+# Package tools for the v0.6.3 update check. Sentinel counts updates
+# with apt, dnf, or pacman. It applies them only after confirmation.
+_PKG_CHECK_ARGV = {
+    'apt': ['apt', 'list', '--upgradable'],
+    'dnf': ['dnf', 'check-update'],
+    'pacman': ['pacman', '-Qu'],
+}
+_PKG_APPLY_ARGV = {
+    'apt': ['sudo', 'apt-get', 'upgrade', '-y'],
+    'dnf': ['sudo', 'dnf', 'upgrade', '-y'],
+    'pacman': ['sudo', 'pacman', '-Syu', '--noconfirm'],
+}
+_PKG_TOOLS = (('apt', 'apt'), ('dnf', 'dnf'), ('pacman', 'pacman'))
+
+
+def count_apt_upgradable(output):
+    """Count packages in `apt list --upgradable` output. Tests use this."""
+    count = 0
+    for line in (output or '').splitlines():
+        line = line.strip()
+        if not line or line.startswith('Listing'):
+            continue
+        if '/' in line:
+            count += 1
+    return count
+
+
+def count_dnf_updates(output):
+    """Count packages in `dnf check-update` output. Tests use this."""
+    count = 0
+    for line in (output or '').splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        if text.startswith(('Last metadata', 'Loaded plugins',
+                             'Dependencies resolved')):
+            continue
+        parts = text.split()
+        if len(parts) >= 3 and '.' in parts[0]:
+            count += 1
+    return count
+
+
+def count_pacman_updates(output):
+    """Count packages in `pacman -Qu` output. Tests use this."""
+    return sum(1 for line in (output or '').splitlines() if line.strip())
+
+
+def detect_pkg_manager(which=None):
+    """Return the manager name for the first tool in PATH.
+
+    Return None when apt, dnf, and pacman are all absent. Tests pass
+    a fake `which`.
+    """
+    find = which or shutil.which
+    for tool, manager in _PKG_TOOLS:
+        try:
+            if find(tool):
+                return manager
+        except Exception:
+            continue
+    return None
+
+
+def pkg_check_argv(manager):
+    """Return the argv list that counts updates. Return None when unknown."""
+    return list(_PKG_CHECK_ARGV.get(manager, []) or []) or None
+
+
+def apply_updates_argv(manager):
+    """Return the argv list that applies updates. Return None when unknown."""
+    return list(_PKG_APPLY_ARGV.get(manager, []) or []) or None
+
+
+def parse_ping_avg(output):
+    """Read mean latency from `ping -c N` output.
+
+    Handle the Linux `rtt` line and the macOS `round-trip` line.
+    Return 'N ms' or None. Tests use this.
+    """
+    match = re.search(r'(?:rtt|round-trip)[^\n=]*=\s*[\d.]+/([\d.]+)/',
+                      output or '')
+    if match:
+        return f'{match.group(1)} ms'
+    return None
+
+
+def validate_action_pid(text, self_pid):
+    """Check typed PID text. Return (pid, None) or (None, reason)."""
+    part = (text or '').strip()
+    if not part.isdigit():
+        return None, 'type digits only'
+    pid = int(part)
+    if pid <= 1:
+        return None, 'PID 1 runs the init process'
+    if pid == self_pid:
+        return None, 'that PID is Sentinel itself'
+    return pid, None
+
+
+def validate_ping_host(text):
+    """Check typed host text. Return (host, None) or (None, reason)."""
+    host = (text or '').strip()
+    if not host:
+        return None, 'type a host name or IP'
+    if len(host) > 253:
+        return None, 'host name too long'
+    if not re.match(r'^[A-Za-z0-9]([A-Za-z0-9.\-]{0,251}[A-Za-z0-9])?$',
+                    host):
+        return None, 'use letters, digits, dots, hyphens'
+    return host, None
+
+
+def docker_action_path(container_id, action):
+    """Build the Engine API path for a container action.
+
+    Raise DockerError on bad input. Tests use this without a daemon.
+    """
+    if action not in ('restart', 'stop'):
+        raise DockerError('error', f'unknown action: {action}')
+    if not container_id or not re.match(r'^[A-Za-z0-9][A-Za-z0-9._\-]+$',
+                                        container_id):
+        raise DockerError('error', f'bad container id: {container_id!r}')
+    if action == 'restart':
+        return f'/containers/{container_id}/restart?t=10'
+    return f'/containers/{container_id}/stop?t=10'
+
+
 _DOCKER_CONN_CLS = None
 
 
@@ -366,6 +507,40 @@ class DockerClient:
             'total': len(containers),
             'containers': containers[:10],
         }
+
+    def _post_json(self, path, timeout=None):
+        """Send an empty POST and read the status. Raise DockerError."""
+        if not os.path.exists(self.socket_path):
+            raise DockerError('socket_missing', f'{self.socket_path} not found')
+        import http.client  # deferred; see _docker_conn_cls()
+        conn = _docker_conn_cls()(self.socket_path,
+                                  timeout=timeout or self.timeout)
+        status = None
+        try:
+            conn.request('POST', f'/{self.API_VERSION}{path}')
+            resp = conn.getresponse()
+            status = resp.status
+            resp.read()
+        except PermissionError as e:
+            raise DockerError('no_permission',
+                              f'cannot access {self.socket_path}: {e}')
+        except (OSError, http.client.HTTPException) as e:
+            raise DockerError('error', f'POST {path} failed: {e}')
+        finally:
+            conn.close()
+        if status not in (200, 204, 304):
+            raise DockerError('error', f'POST {path} -> HTTP {status}')
+        return True
+
+    def restart_container(self, container_id, timeout=30):
+        """Restart one container. Raise DockerError on bad id or failure."""
+        return self._post_json(
+            docker_action_path(container_id, 'restart'), timeout=timeout)
+
+    def stop_container(self, container_id, timeout=30):
+        """Stop one container. Raise DockerError on bad id or failure."""
+        return self._post_json(
+            docker_action_path(container_id, 'stop'), timeout=timeout)
 
     def container_stats(self, container_id):
         """Read one-shot stats. Return (cpu_percent, mem_percent) like the CLI.
@@ -543,6 +718,24 @@ class SentinelMonitor:
         self._loading = False  # Loading state for modal
         self._show_help = False  # Help overlay toggle
         self._show_diagnostics = False  # Diagnostics overlay toggle
+
+        # Quick actions (v0.6.3): cursor state and the one open prompt.
+        # _action_mode is None or one of 'confirm', 'pid', 'ping'.
+        # _confirm holds the destructive wait state (action, label,
+        # container). prompt_text holds typed text for 'pid' and 'ping'.
+        self._action_mode = None
+        self._confirm = None
+        self._prompt_kind = None  # None, 'pid', or 'ping'
+        self._prompt_text = ''
+        self._prompt_error = ''
+        self._docker_cursor = 0
+        self._action_msg = ''
+        self._action_msg_at = 0.0
+        # Update state (v0.6.3): pending pkg count, last error text.
+        # _pkg_last hosts the last 'check updates' result for the header.
+        self._pkg_pending = None
+        self._pkg_last = None
+        self._pkg_error = ''
 
         # P5 frame-skip state. A full draw costs ~2k addstr calls. So it
         # runs only when a visible value changed. _frame_signature() folds
@@ -1022,6 +1215,301 @@ class SentinelMonitor:
             return result.stdout.strip(), result.returncode
         except (OSError, subprocess.SubprocessError, ValueError):
             return "", -1
+
+    def run_cmd_full(self, cmd, timeout=2, stderr=False):
+        """Act like run_cmd but return (stdout, returncode). Return -1 when
+        the process fails to start or times out."""
+        global _RUN_CMD_COUNT
+        _RUN_CMD_COUNT += 1
+        argv = cmd if isinstance(cmd, (list, tuple)) else shlex.split(cmd)
+        try:
+            result = subprocess.run(
+                argv, shell=False, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT if stderr else subprocess.DEVNULL,
+                text=True, timeout=timeout)
+            return result.stdout.strip(), result.returncode
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return "", -1
+
+    # Quick actions (v0.6.3). Each method below does one small task.
+    # The TUI key code calls these and shows the returned message.
+    # Methods that change the host (restart, stop, kill, apply) run
+    # only after a confirmation step in _handle_key.
+
+    def _docker_target(self):
+        """Return the container under the cursor. Clamp the cursor first."""
+        containers = (self.cache.get('docker') or {}).get('containers') or []
+        if not containers:
+            return None
+        self._docker_cursor = max(0, min(self._docker_cursor,
+                                         len(containers) - 1))
+        return containers[self._docker_cursor]
+
+    def _set_action_msg(self, message):
+        """Show a one-line action result. The footer clears it after 8s."""
+        self._action_msg = message
+        self._action_msg_at = time.time()
+        self._status_revision += 1
+
+    def _action_confirm_title(self, kind, label):
+        """Return the short title for a confirmation box. Tests use this."""
+        titles = {
+            'restart': f'Restart container {label}?',
+            'stop': f'Stop container {label}?',
+            'kill': f'Kill PID {label}?',
+            'apply': f'Apply {label} update(s)?',
+        }
+        return titles.get(kind, f'Confirm {label}?')
+
+    def _action_explain(self, kind, label):
+        """Return the two-line effect text for a confirmation box."""
+        lines = {
+            'restart': (f'Restart stops {label} and starts it again.',
+                        'Use Stop first when the app must stay down.'),
+            'stop': (f'Stop halts {label}. It stays down.',
+                     'Restart the container to bring it back.'),
+            'kill': (f'Kill ends PID {label} now. It cannot resume.',
+                     'Restart the service when it must run again.'),
+            'apply': (f'Install {label} update(s) on this host now.',
+                      'Use the package manager. Review the count first.'),
+        }
+        return lines.get(kind, (f'Run {label}?', ''))
+
+    def docker_restart_target(self, dry_run=False):
+        """Restart the container under the cursor. Return a message.
+
+        With dry_run=True, change nothing. Return the message only.
+        Tests use dry_run. The TUI passes dry_run=False after
+        confirmation.
+        """
+        target = self._docker_target()
+        if target is None:
+            return 'No containers to restart'
+        label = target.get('name') or target.get('id') or '?'
+        cid = target.get('id') or ''
+        if dry_run:
+            return f'Restart container {label}?'
+        try:
+            self._get_docker_client().restart_container(cid)
+        except DockerError as e:
+            return f'Restart {label} failed: {e.detail}'
+        except Exception as e:  # keep the TUI alive on socket errors
+            return f'Restart {label} failed: {e}'
+        self.wake_collector('docker')
+        return f'Restarted container {label}'
+
+    def docker_stop_target(self, dry_run=False):
+        """Stop the container under the cursor. Return a message.
+
+        With dry_run=True, change nothing. Return the message only.
+        """
+        target = self._docker_target()
+        if target is None:
+            return 'No containers to stop'
+        label = target.get('name') or target.get('id') or '?'
+        cid = target.get('id') or ''
+        if dry_run:
+            return f'Stop container {label}?'
+        try:
+            self._get_docker_client().stop_container(cid)
+        except DockerError as e:
+            return f'Stop {label} failed: {e.detail}'
+        except Exception as e:  # keep the TUI alive on socket errors
+            return f'Stop {label} failed: {e}'
+        self.wake_collector('docker')
+        return f'Stopped container {label}'
+
+    def docker_cursor_move(self, delta):
+        """Move the Docker cursor by delta. Clamp it. Tests use this."""
+        containers = (self.cache.get('docker') or {}).get('containers') or []
+        if not containers:
+            self._docker_cursor = 0
+            return 0
+        self._docker_cursor = max(
+            0, min(self._docker_cursor + delta, len(containers) - 1))
+        return self._docker_cursor
+
+    def kill_pid(self, pid, dry_run=False):
+        """Send SIGTERM, then SIGKILL after 3s, to one PID.
+
+        With dry_run=True, send no signal. Return the message only.
+        Never kill PID 1 or this process. Tests use dry_run.
+        """
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            return 'Kill failed: bad PID'
+        if pid <= 1:
+            return 'Kill failed: PID 1 runs the init process'
+        if pid == os.getpid():
+            return 'Kill failed: that PID is Sentinel itself'
+        if dry_run:
+            return f'Kill PID {pid}?'
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return f'PID {pid} not found'
+        except PermissionError:
+            return f'Kill PID {pid} failed: permission denied'
+        except OSError as e:
+            return f'Kill PID {pid} failed: {e}'
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                self.wake_collector('processes')
+                return f'Killed PID {pid}'
+            except PermissionError:
+                break
+            time.sleep(0.2)
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            self.wake_collector('processes')
+            return f'Killed PID {pid}'
+        except (PermissionError, OSError) as e:
+            return f'Kill PID {pid} failed: {e}'
+        self.wake_collector('processes')
+        return f'Killed PID {pid}'
+
+    def check_pkg_updates(self):
+        """Count pending OS updates. Save the result. Return a message.
+
+        Use apt, dnf, or pacman (first found in PATH). The header
+        shows the same count. dnf exit code 100 means updates exist.
+        """
+        manager = detect_pkg_manager()
+        if manager is None:
+            self._pkg_error = 'no package manager found (apt, dnf, pacman)'
+            self._pkg_last = None
+            return self._pkg_error
+        argv = pkg_check_argv(manager)
+        out, rc = self.run_cmd_full(argv, timeout=60, stderr=True)
+        if manager == 'apt' and rc != 0:
+            self._pkg_error = 'apt list failed'
+            self._pkg_last = None
+            return self._pkg_error
+        if manager == 'dnf' and rc not in (0, 100):
+            self._pkg_error = 'dnf check-update failed'
+            self._pkg_last = None
+            return self._pkg_error
+        if manager == 'pacman' and rc != 0 and not (out or '').strip():
+            self._pkg_error = 'pacman -Qu failed'
+            self._pkg_last = None
+            return self._pkg_error
+        if manager == 'apt':
+            count = count_apt_upgradable(out)
+        elif manager == 'dnf':
+            count = count_dnf_updates(out)
+        else:
+            count = count_pacman_updates(out)
+        self._pkg_last = {'manager': manager, 'count': count,
+                          'at': time.time()}
+        self._pkg_pending = None
+        self._pkg_error = ''
+        self._status_revision += 1
+        if count == 0:
+            return 'System is up to date'
+        note = 'update' if count == 1 else 'updates'
+        return f'{count} {note} available'
+
+    def apply_pkg_updates(self):
+        """Install pending OS updates. Return a message.
+
+        Run only after confirmation in _handle_key. sudo may ask for
+        a password on the suspended TUI terminal.
+        """
+        manager = detect_pkg_manager()
+        if manager is None:
+            return 'Apply failed: no package manager found'
+        count = (self._pkg_last or {}).get('count')
+        argv = apply_updates_argv(manager)
+        out, rc = self.run_cmd_full(argv, timeout=3600, stderr=True)
+        _ = out
+        if rc != 0:
+            return f'Apply failed: {manager} exited with code {rc}'
+        self._pkg_last = None
+        self.wake_collector('update_check')
+        if count:
+            note = 'update' if count == 1 else 'updates'
+            return f'Applied {count} {note}'
+        return 'Updates applied'
+
+    def ping_host_text(self, host):
+        """Ping one host once. Return a short result message. No confirm.
+
+        Validate the host first. Refuse shell use. Refuse long waits.
+        """
+        target, reason = validate_ping_host(host)
+        if target is None:
+            return f'Ping failed: {reason}'
+        ping_path = shutil.which('ping')
+        if ping_path is None:
+            return 'Ping failed: ping not found'
+        out, rc = self.run_cmd_full(
+            [ping_path, '-c', '3', '-W', '2', target], timeout=15)
+        avg = parse_ping_avg(out)
+        if rc == 0 and avg:
+            return f'{target}: {avg}'
+        if avg:
+            return f'{target}: {avg} (packet loss)'
+        return f'{target}: no reply'
+
+    def _modal_rows(self, title, body_lines, foot):
+        """Build box rows for a small modal. Return (rows, width)."""
+        inner = [title] + list(body_lines) + [foot]
+        width = max(len(line) for line in inner) + 4
+        rows = []
+        rows.append("╭" + "─" * (width - 2) + "╮")
+        rows.append(f"│ {title}" + " " * (width - 3 - len(title)) + "│")
+        rows.append("│" + " " * (width - 2) + "│")
+        for line in body_lines:
+            rows.append(f"│ {line}" + " " * (width - 3 - len(line)) + "│")
+        rows.append("│" + " " * (width - 2) + "│")
+        rows.append(f"│ {foot}" + " " * (width - 3 - len(foot)) + "│")
+        rows.append("╰" + "─" * (width - 2) + "╯")
+        return rows, width
+
+    def _draw_modal_rows(self, stdscr, h, w, rows, width, color=3):
+        """Draw centered modal rows. Clip them to the screen size."""
+        start_y = max(0, (h - len(rows)) // 2)
+        start_x = max(0, (w - width) // 2)
+        try:
+            for i, line in enumerate(rows):
+                if start_y + i >= h:
+                    break
+                text = line[:max(0, w - start_x - 1)]
+                if text and start_x < w - 1:
+                    stdscr.addstr(start_y + i, start_x, text,
+                                  curses.color_pair(color))
+        except curses.error:
+            pass
+
+    def draw_confirm_modal(self, stdscr, h, w):
+        """Draw the yes/no box for a destructive act (v0.6.3)."""
+        kind = (self._confirm or {}).get('kind', '')
+        label = (self._confirm or {}).get('label', '?')
+        title = self._action_confirm_title(kind, label)
+        line1, line2 = self._action_explain(kind, label)
+        body = [line1]
+        if line2:
+            body.append(line2)
+        rows, width = self._modal_rows(title, body, "y run / n cancel")
+        self._draw_modal_rows(stdscr, h, w, rows, width, color=4)
+
+    def draw_prompt_modal(self, stdscr, h, w):
+        """Draw the text input box for PID and ping (v0.6.3)."""
+        title = self._prompt_title()
+        shown = self._prompt_text + "█"
+        body = [shown, ""]
+        if self._prompt_error:
+            body[1] = f"Error: {self._prompt_error}"
+        else:
+            body[1] = "Enter runs / Esc cancels"
+        rows, width = self._modal_rows(title, body, "")
+        rows = rows[:-2] + [rows[-1]]
+        self._draw_modal_rows(stdscr, h, w, rows, width, color=1)
 
     def read_sys_file(self, path, cast=str):
         """Read a value from /sys. Cast it when `cast` is set."""
@@ -2297,21 +2785,31 @@ class SentinelMonitor:
     def draw_help_modal(self, stdscr, h, w):
         """Draw the help overlay with keys and permission states."""
         help_lines = [
-            "╭────────────── HELP ──────────────╮",
-            "│                                  │",
-            "│  q      Quit                     │",
-            "│  r      Refresh now              │",
-            "│  t      Cycle themes             │",
-            "│  l      Cycle layouts            │",
-            "│  i      Refresh public IP        │",
-            "│  h      Toggle this help         │",
-            "│  d      Diagnostics / Permissions│",
-            "│  +/-    Adjust refresh rate      │",
-            "│                                  │",
-            "│  Layouts: default, cpu, network, │",
-            "│    docker, security, minimal     │",
-            "│                                  │",
-            "╰──────────────────────────────────╯",
+            "╭─────────────── HELP ───────────────╮",
+            "│                                    │",
+            "│  q      Quit                       │",
+            "│  r      Refresh now                │",
+            "│  t      Cycle themes               │",
+            "│  l      Cycle layouts              │",
+            "│  i      Refresh public IP          │",
+            "│  h      Toggle this help           │",
+            "│  d      Diagnostics / Permissions  │",
+            "│  +/-    Adjust refresh rate        │",
+            "│  j/k    Move Docker cursor         │",
+            "│  x      Restart container          │",
+            "│  s      Stop container             │",
+            "│  k      Type PID, then kill it     │",
+            "│  u      Check for OS updates       │",
+            "│  a      Apply OS updates           │",
+            "│  p      Ping a host                │",
+            "│                                    │",
+            "│  x s k a ask first. Answer y       │",
+            "│  to run, n or Esc to cancel.       │",
+            "│                                    │",
+            "│  Layouts: default, cpu, network,   │",
+            "│    docker, security, minimal       │",
+            "│                                    │",
+            "╰────────────────────────────────────╯",
         ]
         
         modal_h = len(help_lines)
@@ -2583,6 +3081,17 @@ class SentinelMonitor:
         except curses.error:
             pass
 
+    def pkg_header_text(self):
+        """Return the update count text for the header. None hides it."""
+        info = getattr(self, '_pkg_last', None)
+        if not info:
+            return None
+        count = info.get('count', 0)
+        if count <= 0:
+            return None
+        note = 'update' if count == 1 else 'updates'
+        return f'{count} {note}'
+
     def draw_header(self, stdscr, width, uptime_str):
         """Draw a minimal header with permission marks."""
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -2611,7 +3120,14 @@ class SentinelMonitor:
                 if perm_x < width - 30:
                     stdscr.addstr(0, perm_x, char, curses.color_pair(color) | curses.A_BOLD)
                     perm_x += 2
-            
+
+            # Draw the pending update count (v0.6.3: key u fills it)
+            pkg_text = self.pkg_header_text()
+            if pkg_text and perm_x + len(pkg_text) + 1 < width - 30:
+                stdscr.addstr(0, perm_x, pkg_text,
+                              curses.color_pair(3) | curses.A_BOLD)
+                perm_x += len(pkg_text) + 1
+
             # Draw the hostname centered
             host_text = self.hostname
             host_x = (width - len(host_text)) // 2
@@ -2991,6 +3507,9 @@ class SentinelMonitor:
             self.refresh_rate,
             self._show_help,
             self._show_diagnostics,
+            self._action_mode,      # prompt/confirm boxes change keys
+            self._action_msg,       # one-line action result
+            getattr(self, '_docker_cursor', 0),
         )
 
     def _tick_clock(self, stdscr, w):
@@ -3025,12 +3544,144 @@ class SentinelMonitor:
         ms = int((min(next_data, next_second) - now) * 1000)
         return max(20, min(1000, ms))
 
+    def _prompt_open(self, kind):
+        """Open a text prompt ('pid' or 'ping'). Clear old text."""
+        self._action_mode = 'prompt'
+        self._prompt_kind = kind
+        self._prompt_text = ''
+        self._prompt_error = ''
+        self._confirm = None
+        self._show_help = False
+        self._show_diagnostics = False
+        self._status_revision += 1
+
+    def _prompt_title(self):
+        """Return the prompt box title. Tests use this."""
+        if self._prompt_kind == 'pid':
+            return 'Kill which PID?'
+        if self._prompt_kind == 'ping':
+            return 'Ping which host?'
+        return 'Type a value'
+
+    def _prompt_handle_key(self, key):
+        """Handle one key while a prompt is open. Return True when done."""
+        if key in (27,):  # Esc cancels
+            self._action_mode = None
+            self._prompt_kind = None
+            self._prompt_text = ''
+            self._prompt_error = ''
+            self._status_revision += 1
+            return True
+        if key in (10, 13, curses.KEY_ENTER):  # Enter submits
+            if self._prompt_kind == 'pid':
+                pid, reason = validate_action_pid(
+                    self._prompt_text, os.getpid())
+                if pid is None:
+                    self._prompt_error = reason
+                    self._status_revision += 1
+                    return False
+                self._confirm = {'kind': 'kill', 'label': str(pid),
+                                 'pid': pid}
+                self._action_mode = 'confirm'
+                self._prompt_kind = None
+                self._prompt_text = ''
+                self._prompt_error = ''
+            elif self._prompt_kind == 'ping':
+                host, reason = validate_ping_host(self._prompt_text)
+                if host is None:
+                    self._prompt_error = reason
+                    self._status_revision += 1
+                    return False
+                self._action_mode = None
+                self._prompt_kind = None
+                self._prompt_text = ''
+                self._prompt_error = ''
+                self._set_action_msg(self.ping_host_text(host))
+            else:
+                self._action_mode = None
+            self._status_revision += 1
+            return True
+        if key in (curses.KEY_BACKSPACE, 8, 127):
+            self._prompt_text = self._prompt_text[:-1]
+            self._prompt_error = ''
+            self._status_revision += 1
+            return False
+        if 32 <= key <= 126 and len(self._prompt_text) < 64:
+            self._prompt_text += chr(key)
+            self._prompt_error = ''
+            self._status_revision += 1
+            return False
+        return False
+
+    def _confirm_open(self, kind, label, **extra):
+        """Open a confirmation box for a destructive act. Tests use this."""
+        self._confirm = {'kind': kind, 'label': label, **extra}
+        self._action_mode = 'confirm'
+        self._show_help = False
+        self._show_diagnostics = False
+        self._status_revision += 1
+
+    def _confirm_handle_key(self, key):
+        """Handle one key while a confirm box is open. Return True when done."""
+        if key in (ord('y'), ord('Y')):
+            kind = (self._confirm or {}).get('kind')
+            label = (self._confirm or {}).get('label', '?')
+            if kind == 'restart':
+                self._set_action_msg(self.docker_restart_target())
+            elif kind == 'stop':
+                self._set_action_msg(self.docker_stop_target())
+            elif kind == 'kill':
+                self._set_action_msg(
+                    self.kill_pid((self._confirm or {}).get('pid')))
+            elif kind == 'apply':
+                self._set_action_msg(self._suspend_and_apply())
+            else:
+                self._set_action_msg(f'Unknown action: {kind}')
+            self._confirm = None
+            self._action_mode = None
+            return True
+        if key in (ord('n'), ord('N'), 27):  # n or Esc cancels
+            self._confirm = None
+            self._action_mode = None
+            self._set_action_msg('Cancelled')
+            return True
+        return False
+
+    def _suspend_and_apply(self):
+        """Stop curses, apply updates, then resume. Return a message.
+
+        sudo may ask for a password. The user must see that prompt.
+        So the TUI suspends first. send_mail style tests stub this.
+        """
+        message = 'Apply cancelled: screen unavailable'
+        try:
+            curses.endwin()
+        except Exception:
+            pass
+        try:
+            message = self.apply_pkg_updates()
+        finally:
+            try:
+                curses.doupdate()
+            except Exception:
+                pass
+        return message
+
     def _handle_key(self, stdscr, key):
         """Handle one key. Return True to quit the main loop.
 
         The full-draw and frame-skip paths share this code. Each branch
         that changes screen content also changes _frame_signature(). So
-        the next pass repaints alone, with no extra refresh call."""
+        the next pass repaints alone, with no extra refresh call.
+
+        Quick actions (v0.6.3): x s k a need a yes/no step. A prompt
+        or confirm box owns the keys until it closes."""
+        if self._action_mode == 'confirm':
+            self._confirm_handle_key(key)
+            return False
+        if self._action_mode == 'prompt':
+            self._prompt_handle_key(key)
+            return False
         if key == curses.KEY_RESIZE:
             # The terminal changed size. Build the layout again
             self._cached_layout = None
@@ -3066,6 +3717,37 @@ class SentinelMonitor:
         elif key == ord('-') or key == ord('_'):
             # Lengthen the refresh interval (slower)
             self.refresh_rate = min(10, self.refresh_rate + 1)
+        elif key in (curses.KEY_DOWN,):
+            self.docker_cursor_move(1)
+        elif key in (curses.KEY_UP,):
+            self.docker_cursor_move(-1)
+        elif key == ord('x') or key == ord('X'):
+            target = self._docker_target()
+            if target is None:
+                self._set_action_msg('No containers to restart')
+            else:
+                label = target.get('name') or target.get('id') or '?'
+                self._confirm_open('restart', label)
+        elif key == ord('s') or key == ord('S'):
+            target = self._docker_target()
+            if target is None:
+                self._set_action_msg('No containers to stop')
+            else:
+                label = target.get('name') or target.get('id') or '?'
+                self._confirm_open('stop', label)
+        elif key == ord('k') or key == ord('K'):
+            self._prompt_open('pid')
+        elif key == ord('u') or key == ord('U'):
+            self._set_action_msg(self.check_pkg_updates())
+        elif key == ord('a') or key == ord('A'):
+            info = getattr(self, '_pkg_last', None)
+            if not info or info.get('count', 0) <= 0:
+                self._set_action_msg(
+                    'No updates to apply. Press u to check first.')
+            else:
+                self._confirm_open('apply', str(info.get('count', 0)))
+        elif key == ord('p') or key == ord('P'):
+            self._prompt_open('ping')
         return False
 
     def draw(self, stdscr):
@@ -3635,14 +4317,26 @@ class SentinelMonitor:
                                 
                                 # List containers to fit the free space
                                 containers_to_show = min(len(docker['containers']), docker_lines)
-                                for container in docker['containers'][:containers_to_show]:
+                                for idx, container in enumerate(
+                                        docker['containers'][:containers_to_show]):
                                     if line >= ph:
                                         break
                                     name = container['name'][:pw - 8]
                                     status_icon = "●" if container['status'] == 'running' else "○"
                                     status_color = curses.color_pair(2) if container['status'] == 'running' else curses.color_pair(4)
-                                    stdscr.addstr(py + line, px, f" {status_icon}", status_color)
-                                    stdscr.addstr(py + line, px + 3, name, curses.color_pair(8))
+                                    # v0.6.3: mark the cursor row. j/k move
+                                    # it. x restarts it. s stops it.
+                                    cursor_here = (idx == getattr(
+                                        self, '_docker_cursor', 0))
+                                    mark = ">" if cursor_here else " "
+                                    row_attr = (curses.A_REVERSE
+                                                if cursor_here else 0)
+                                    stdscr.addstr(py + line, px, mark,
+                                                  curses.color_pair(3) | row_attr)
+                                    stdscr.addstr(py + line, px + 1, f"{status_icon}",
+                                                  status_color | row_attr)
+                                    stdscr.addstr(py + line, px + 3, name,
+                                                  curses.color_pair(8) | row_attr)
                                     # Health (v0.6.2): green dot means healthy,
                                     # red cross means down. Stopped containers
                                     # show their status icon only.
@@ -3771,7 +4465,23 @@ class SentinelMonitor:
                     col += 5
                     stdscr.addstr(footer_y, col, "+/-", curses.color_pair(3) | curses.A_BOLD)
                     col += 4
-                    
+                    # v0.6.3 quick action keys
+                    for act_key, act_len in (("x", 1), ("s", 1), ("k", 1),
+                                             ("u", 1), ("a", 1), ("p", 1)):
+                        try:
+                            stdscr.addstr(footer_y, col, act_key,
+                                          curses.color_pair(3) | curses.A_BOLD)
+                        except curses.error:
+                            break
+                        col += act_len
+                        if col + 1 >= w:
+                            break
+                    col += 1
+
+                    # Show the last action result for 8s (then clear it)
+                    if self._action_msg and (
+                            time.time() - self._action_msg_at > 8):
+                        self._action_msg = ''
                     # Draw the theme, layout, and refresh rate
                     theme_text = f"[{self.theme_name}]"
                     stdscr.addstr(footer_y, col + 1, theme_text, curses.color_pair(1))
@@ -3802,10 +4512,24 @@ class SentinelMonitor:
                 # Draw the help overlay when active
                 if self._show_help:
                     self.draw_help_modal(stdscr, h, w)
-                
+
                 # Draw the diagnostics overlay when active
                 if self._show_diagnostics:
                     self.draw_diagnostics_modal(stdscr, h, w)
+
+                # Draw the quick-action boxes when active (v0.6.3).
+                # Confirm owns y/n/Esc. Prompt owns text/Enter/Esc.
+                if self._action_mode == 'confirm' and self._confirm:
+                    self.draw_confirm_modal(stdscr, h, w)
+                elif self._action_mode == 'prompt':
+                    self.draw_prompt_modal(stdscr, h, w)
+                elif self._action_msg:
+                    max_msg = max(0, w - 4)
+                    try:
+                        stdscr.addstr(h - 2, 1, self._action_msg[:max_msg],
+                                      curses.color_pair(3) | curses.A_BOLD)
+                    except curses.error:
+                        pass
 
                 stdscr.refresh()
 

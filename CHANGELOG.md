@@ -1,5 +1,46 @@
 # Changelog
 
+## v0.6.3 - quick actions
+
+Sentinel is now a tool, not just a panel.
+Sentinel restarts and stops containers.
+Sentinel kills a process by PID.
+Sentinel counts and applies OS updates.
+Sentinel pings a host.
+Each destructive key asks first.
+Press `y` to run.
+Press `n` or `Esc` to cancel.
+
+Press `j`/`k` or arrows to mark a container.
+Press `x` to restart the marked container.
+Press `s` to stop the marked container.
+Press `k` to type a PID, then kill it.
+The kill sends SIGTERM first.
+The kill sends SIGKILL after 3s.
+Sentinel never kills PID 1.
+Sentinel never kills its own PID.
+Press `u` to count OS updates.
+The count shows in the header.
+`u` uses `apt`, `dnf`, or `pacman`.
+Press `a` to apply updates.
+`a` needs a prior `u` check.
+`a` stops the panel for the sudo prompt.
+Press `p` to ping a host.
+`p` sends 3 probes and shows mean latency.
+`p` asks for no confirm.
+`p` changes nothing on the host.
+
+The Docker path uses the Engine API socket.
+The kill path uses `os.kill`.
+The update path uses argv lists, never a shell.
+The ping path uses argv lists, never a shell.
+The host check rejects shell text.
+`tests/test-actions.py` holds 66 checks.
+All checks use dry-run or stubs.
+No check restarts a container.
+No check kills a PID.
+No check starts a child process.
+
 ## v0.6.2 - service health checks
 
 A container that runs is not a service that works.
