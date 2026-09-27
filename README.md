@@ -10,23 +10,6 @@ hosts with small CPUs and small memory.
 ![Platform](https://img.shields.io/badge/platform-linux-lightgrey.svg)
 ![Version](https://img.shields.io/badge/version-0.6.5-cyan.svg)
 
-```
-+------------------ CPU (12 cores, 15.5%) ------------------+------------------ MEM (22.2%) ------------------+------ NET (eth0, 10Gbps) ------+
-|  0 [------------------------]   4 [------------------------]  |  [================================]  |  172.17.0.2                              |
-|  1 [------------------------]   5 [------------------------]  |                                        |  down 0.0 KB/s  //////////////////////  |
-|  2 [------------------------]   6 [------------------------]  |                                        |  up   0.0 KB/s  //////////////////////  |
-|  3 [------------------------]   7 [------------------------]  |                                     ___  |  signal: [####------]                   |
-|  4.70GHz   0C  N/A  load 5.02 5.11 5.89  up 0d 1h 21m         |  3.4G/15.2G                           ___  |                                            |
-+------------------ DISKS ------------------+------------------- POWER ------------------+
-|  /      [========================]    3%  |  no power data (RAPL needs root)         |
-|  /home  [========================]    3%  |  3 tasks - python3 2.0%                  |
-+-------------------------------------------+  k8s: not installed                      +
-   quit refresh theme layout help +/- xskuap  [default] [default] [3s]                  |
-```
-
-> Real frame, caught from Sentinel with `bench/capture_frame.py`
-> (Debian container, light mode). Your host shows true facts.
-
 ## Quick start
 
 Type two commands. Sentinel starts in seconds.
@@ -74,7 +57,7 @@ sentinel --host sentinel-hosts.json
 
 ```
   HOST               CPU%   MEM%   LOAD            UPTIME      CTNRS  PODS  ALERTS / STATUS
-  pi4                  12     44   0.50,0.40,0.30  3d 1h 2m      2/3     5  ok â—2
+  pi4                  12     44   0.50,0.40,0.30  3d 1h 2m      2/3     5  ok ●2
   vps-ams               8     61   0.20,0.15,0.10  12d 4h 9m     4/4     0  ok
   homelab               -      -   -               -             -       -  ERR: timeout after 15s
 
@@ -82,7 +65,7 @@ sentinel --host sentinel-hosts.json
 ```
 
 Each row shows CPU, RAM, load, uptime, containers, pods, and alerts.
-A green `â—2` means 2 health checks pass. A red `âœ—1` means 1 fails.
+A green `●2` means 2 health checks pass. A red `✗1` means 1 fails.
 A dark host states the cause: timeout, auth failure, or lost file.
 
 - Press `Enter` to open SSH to the marked host and start Sentinel on it.
@@ -121,7 +104,7 @@ A container can run while the app in it dies. Sentinel probes the app.
 }
 ```
 
-- A green `â—` near the name means the app answers. A red `âœ—` means it fails.
+- A green `●` near the name means the app answers. A red `✗` means it fails.
 - A short name matches part of the name: `web` matches `project-web-1`.
   A full name always wins.
 - A link-local target (the cloud-metadata range) is refused before any
@@ -366,7 +349,7 @@ Full facts for each change stay in [CHANGELOG.md](CHANGELOG.md).
 - **v0.6.3** - Quick acts with a confirm step: restart/stop containers,
   kill by PID, count and install OS updates, ping hosts.
 - **v0.6.2** - Health checks per container plus TCP listener checks.
-  `â—`/`âœ—` marks in Docker, fleet, and `--dump`.
+  `●`/`✗` marks in Docker, fleet, and `--dump`.
 - **v0.6.1** - Fleet mode (`--host`): one table for the full homelab
   through plain SSH. Zero agent.
 - **v0.6.0** - Collectors that do not block, zero child acts on the
