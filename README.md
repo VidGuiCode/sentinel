@@ -99,7 +99,7 @@ Sentinel is a workbench, not just a view. Each act asks first.
 | `x` | Restart the marked container (asks first) |
 | `s` | Stop the marked container (asks first) |
 | `k` | Type a PID, then kill it (asks first, guards PID 1 and Sentinel) |
-| `u` | Count OS updates (apt, dnf, pacman, apk, zsh) |
+| `u` | Count OS updates (apt, dnf, pacman) |
 | `a` | Install the counted updates (asks first, needs `u` first) |
 | `p` | Ping a host, see latency in plain text |
 
@@ -124,6 +124,8 @@ A container can run while the app in it dies. Sentinel probes the app.
 - A green `â—` near the name means the app answers. A red `âœ—` means it fails.
 - A short name matches part of the name: `web` matches `project-web-1`.
   A full name always wins.
+- A link-local target (the cloud-metadata range) is refused before any
+  request. Plain LAN and `localhost` checks stay allowed.
 - A shut listener port raises a `PORT CLOSED` alert. A failed app raises
   a `SERVICE DOWN` alert.
 - The fleet table shows the same marks per host.
@@ -206,6 +208,8 @@ with zero restart.
 | `i` | Check public IP |
 | `Up`/`Down` | Move container mark |
 | `x` / `s` / `k` / `u` / `a` / `p` | Acts (see Fix things here) |
+| `y` / `n` / `Esc` | Confirm or cancel an act |
+| `j` / `k` / `Enter` | In fleet mode: mark host, open SSH |
 | `+` | Faster refresh (min 1s) |
 | `-` | Slower refresh (max 10s) |
 
@@ -343,7 +347,9 @@ acts in WSL2.
 `bench/` measures CPU, RSS, wakeups, and throttle facts in simulated
 host profiles (Pi 3, Pi 4). `bench/capture_frame.py` catches true
 screen frames from a pty, so tests assert on what users see. ARM smoke
-tests pass 16 of 16 under QEMU.
+tests pass 16 of 16 under QEMU. The `tests/` directory holds three
+stub-based suites - reload, actions, intervals - with 157 checks in
+total. No check starts a collector or a child process.
 
 Worst CPU burst on a Pi 3 profile: **12.9% in v0.5.1, 1.3% in v0.6.0.**
 Full facts in [PERFORMANCE.md](PERFORMANCE.md).
