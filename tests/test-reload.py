@@ -82,7 +82,7 @@ os.makedirs(_TMP, exist_ok=True)
 
 
 # version tag
-check('version is 0.6.5', sm.VERSION == '0.6.5')
+check('version is 0.6.6', sm.VERSION == '0.6.6')
 
 # config_mtime: missing path gives 0.0
 check('mtime missing is 0.0',

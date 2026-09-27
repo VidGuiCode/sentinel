@@ -8,7 +8,7 @@ hosts with small CPUs and small memory.
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.6+-green.svg)
 ![Platform](https://img.shields.io/badge/platform-linux-lightgrey.svg)
-![Version](https://img.shields.io/badge/version-0.6.5-cyan.svg)
+![Version](https://img.shields.io/badge/version-0.6.6-cyan.svg)
 
 ## Quick start
 
@@ -301,6 +301,46 @@ and `health` 30. The default `{}` keeps these defaults.
 - `sentinel --dump` includes the effective `intervals` map, so a
   host reports how fresh its own panels are.
 
+`notifications` sends each panel alert to webhooks. It holds a list
+of `webhooks` and a `cooldown` in seconds.
+
+```json
+{
+  "notifications": {
+    "webhooks": ["https://discord.com/api/webhooks/..."],
+    "cooldown": 300
+  }
+}
+```
+
+- An alert state change POSTs one JSON object to each webhook. It
+  fires for every alert the panel already raises: CPU, TEMP, MEM,
+  BATTERY, DOCKER STOPPED, SERVICE DOWN, PORT CLOSED, K8S
+  FAILED/PENDING, and the security alerts.
+- Three events fire: `fired` for a new alert, `still firing` for the
+  same alert after the cooldown passed, `resolved` when the alert
+  clears. The cooldown is the minimum seconds between two sends for
+  the same alert name (60-86400, default 300).
+- One notification state covers one alert name. Two containers down
+  at once merge into one notification; the cooldown reminder catches
+  the second.
+- The body carries the same line under four keys: `title`, `message`,
+  `content`, `text`. Discord, Slack, and Gotify-style endpoints all
+  find their field. `title` is `Sentinel <hostname>`.
+- Edits act at once: `notifications` is a safe key, no restart.
+  Delivery runs on one background thread that starts on the first
+  event.
+- Light mode skips webhook delivery (HTTP needs `urllib`, ~2MB RSS,
+  the same promise as the health checks). `--dump` and fleet probes
+  never send notifications; the panel and `--service` mode do.
+- Each webhook URL passes the same guard as the health checks:
+  http/https only, the host must resolve, link-local addresses (the
+  cloud-metadata range) are refused. LAN and localhost webhooks
+  (self-hosted Gotify/ntfy) stay allowed.
+- Run `sentinel --test-notify` to verify the setup. It sends one test
+  message to every webhook, prints `OK`/`FAIL` per URL, exits 0 on
+  full success and 1 on any failure.
+
 ## Needs
 
 - Python 3.6+ with only the standard library. Zero pip packages.
@@ -341,6 +381,10 @@ Full facts in [PERFORMANCE.md](PERFORMANCE.md).
 
 Full facts for each change stay in [CHANGELOG.md](CHANGELOG.md).
 
+- **v0.6.6** - Webhook notifications: a new `notifications` key
+  POSTs every panel alert to Discord, Slack, or Gotify-style
+  endpoints. Edits apply live, no restart. `--test-notify` verifies
+  the setup.
 - **v0.6.5** - Per-panel refresh intervals: a new `intervals` key
   maps each panel to seconds. Edits apply live, no restart.
 - **v0.6.4** - Config hot-reload: file edits act at once, no restart.

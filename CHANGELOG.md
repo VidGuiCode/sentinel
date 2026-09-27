@@ -1,5 +1,61 @@
 # Changelog
 
+## v0.6.6 - webhook notifications
+
+`config.json` takes a new `notifications` key.
+The key holds `webhooks` (a list of URLs) and `cooldown` (seconds).
+The default `{'webhooks': [], 'cooldown': 300}` keeps the feature off.
+An empty `webhooks` list sends nothing.
+
+An alert state change POSTs one JSON object to each webhook.
+The body carries the same line under four keys:
+`title`, `message`, `content`, and `text`.
+So Discord, Slack, and Gotify-style endpoints all find their field.
+`title` is `Sentinel <hostname>`.
+
+Three events fire: `fired`, `still firing`, and `resolved`.
+`fired` marks a new alert.
+`still firing` repeats the same alert after the cooldown passed.
+`resolved` reports that the alert cleared.
+`cooldown` is the minimum seconds between two sends for the same alert name.
+The range is 60 to 86400 seconds; the default is 300.
+One notification state covers one alert name.
+Two containers down at once merge into one notification.
+The cooldown reminder catches the second.
+
+The key covers every alert the panel already raises.
+Those are CPU, TEMP, MEM, BATTERY, DOCKER STOPPED, SERVICE DOWN,
+PORT CLOSED, K8S FAILED/PENDING, and the security alerts.
+
+`notifications` joins the safe keys for hot-reload.
+An edit applies live, with no restart.
+Delivery runs on one background thread.
+The thread starts on the first event.
+
+Light mode skips webhook delivery.
+HTTP needs `urllib`, about 2MB RSS.
+That is the same promise as the health checks.
+`sentinel --dump` and the fleet probes never send notifications.
+The interactive panel and `--service` mode do.
+
+Every webhook URL passes the same guard as the health checks.
+Only http and https are allowed.
+The host must resolve.
+A link-local address (the cloud-metadata range) is refused.
+LAN and localhost webhooks (self-hosted Gotify, ntfy) stay allowed.
+
+`sentinel --test-notify` sends one test message to every configured webhook.
+It prints `OK` or `FAIL` per URL.
+It exits 0 on full success and 1 on any failure.
+It works on hosts with no curses.
+
+The diagnostics overlay (`d`) shows a `notify` entry with the delivery state.
+
+`tests/test-notify.py` holds 38 checks.
+All checks use stubs or temp files.
+No check starts a collector.
+No check starts a child process.
+
 ## v0.6.5 - per-panel refresh intervals
 
 `config.json` takes a new `intervals` key.

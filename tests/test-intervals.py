@@ -97,7 +97,7 @@ os.makedirs(_TMP, exist_ok=True)
 
 
 # version tag
-check('version is 0.6.5', sm.VERSION == '0.6.5')
+check('version is 0.6.6', sm.VERSION == '0.6.6')
 
 # valid_intervals: the shape rules
 check('empty map is valid', sm.valid_intervals({}) is True)

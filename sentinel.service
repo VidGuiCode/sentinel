@@ -1,5 +1,5 @@
 [Unit]
-Description=Sentinel v0.6.5 System Monitor Service
+Description=Sentinel v0.6.6 System Monitor Service
 Documentation=https://github.com/VidGuiCode/sentinel
 After=network.target docker.service
 Wants=docker.service

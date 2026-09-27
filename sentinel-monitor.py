@@ -70,6 +70,7 @@ def require_curses():
 
 import time
 import os
+import queue
 import re
 import sys
 import copy
@@ -89,7 +90,7 @@ from datetime import datetime, timedelta
 from collections import deque
 from pathlib import Path
 
-VERSION = "0.6.5"
+VERSION = "0.6.6"
 
 # Profile record (active only when SENTINEL_PROFILE holds a path)
 _PROFILE_PATH = os.environ.get('SENTINEL_PROFILE')
@@ -164,6 +165,16 @@ DEFAULT_CONFIG = {
     'listeners': [
         # 22, 80, 443,
     ],
+    # Webhook notifications (v0.6.6): alert state changes queue to one
+    # background POST. Empty webhooks keep the feature off. The body is
+    # one JSON object with title/message/content/text, so Discord,
+    # Slack, and Gotify-style endpoints all find their field.
+    'notifications': {
+        'webhooks': [
+            # 'https://discord.com/api/webhooks/...',
+        ],
+        'cooldown': 300,
+    },
 }
 
 # Collector names a user may retune in config (`intervals`). Keep in
@@ -192,6 +203,68 @@ def valid_intervals(value):
         if not 1 <= seconds <= 604800:
             return False
     return True
+
+
+def valid_notifications(value):
+    """True when `notifications` is a clean webhook config.
+
+    webhooks holds up to 10 http(s) URLs; cooldown is seconds between
+    two sends for the same alert name. One bad entry fails the whole
+    key, same policy as the other config keys."""
+    if not isinstance(value, dict):
+        return False
+    hooks = value.get('webhooks')
+    if not isinstance(hooks, list) or len(hooks) > 10:
+        return False
+    for url in hooks:
+        if not isinstance(url, str) or not url.startswith(('http://', 'https://')):
+            return False
+    cooldown = value.get('cooldown', 300)
+    if isinstance(cooldown, bool) or not isinstance(cooldown, (int, float)):
+        return False
+    if not 60 <= cooldown <= 86400:
+        return False
+    return True
+
+
+def _url_guard_detail(url):
+    """Return a refusal reason for a user-supplied URL, or None to allow.
+
+    Checks the scheme (http/https) and the resolved host. A link-local
+    address is refused, so a pasted cloud-metadata address cannot turn
+    an HTTP feature into a proxy for instance credentials. Plain LAN
+    and localhost targets stay allowed - that is the use case."""
+    if not isinstance(url, str) or not url.startswith(('http://', 'https://')):
+        return 'bad url (need http:// or https://)'
+    import urllib.parse  # deferred with the rest of urllib
+    host = urllib.parse.urlsplit(url).hostname
+    if not host:
+        return 'bad url (no host)'
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return f'cannot resolve {host[:40]}'
+    import ipaddress  # deferred: light mode keeps its small set
+    if any(ipaddress.ip_address(i[4][0]).is_link_local for i in infos):
+        return 'blocked url (link-local host)'
+    return None
+
+
+def _webhook_post(urllib_request, url, payload, timeout=5):
+    """POST one JSON payload to a webhook. Return (ok, detail).
+
+    urllib.request is a parameter, not an import: the notifier worker
+    is the only caller that loads it, so a config with no webhooks
+    never pays its RSS."""
+    try:
+        data = json.dumps(payload).encode('utf-8')
+        opener = urllib_request.build_opener()
+        opener.addheaders = [('User-Agent', f'sentinel/{VERSION}'),
+                             ('Content-Type', 'application/json')]
+        with opener.open(url, data=data, timeout=timeout) as resp:
+            return (200 <= resp.status < 300, f'HTTP {resp.status}')
+    except (OSError, ValueError) as e:
+        return (False, str(e)[:80])
 
 # Color themes
 def _curses_color(name, fallback):
@@ -976,6 +1049,13 @@ class SentinelMonitor:
         # collector. update_data() merges the results into the snapshot.
         self.health_checks = self.config.get('health_checks', {}) or {}
         self.listeners = self.config.get('listeners', []) or []
+        # Webhook notifications (v0.6.6): alert state changes queue to
+        # one worker thread. The worker starts on the first job, so a
+        # config with no webhooks never pays the urllib RSS.
+        self.notifications = self.config.get('notifications') or {}
+        self._notify_queue = queue.Queue()
+        self._alert_state = {}
+        self._notify_worker_started = False
         
         # Cache /proc/stat for merged CPU reads (fast path)
         self._proc_stat_cache = None
@@ -1081,7 +1161,8 @@ class SentinelMonitor:
         Safe keys update at once: theme, layout, refresh_rate, alerts,
         health_checks, listeners, proxy_logs, security_logs,
         security_alerts, show_per_core, show_vpn, public_ip_check,
-        intervals. They touch reads only; no thread restarts.
+        intervals, notifications. They touch reads only; no thread
+        restarts.
 
         Held keys stay for the next start: light_mode (it sizes
         history and starts collectors) and log_file. CLI keys also
@@ -1150,6 +1231,31 @@ class SentinelMonitor:
 
         _take('intervals', valid_intervals, _intervals_apply,
               'need known panel, seconds 1-604800')
+
+        def _notifications_apply(value):
+            self.notifications = {'webhooks': list(value.get('webhooks') or []),
+                                  'cooldown': int(value.get('cooldown', 300))}
+            # Stub-safe like every other apply: a test stub carries only
+            # the live fields it needs, so the status map is optional.
+            status = getattr(self, '_set_feature_status', None)
+            if not callable(status):
+                return
+            hooks = self.notifications['webhooks']
+            try:
+                if not hooks:
+                    status('notify', 'unavailable', 'no webhooks configured',
+                           'set notifications.webhooks in config.json (see README)')
+                elif getattr(self, '_light_mode', False):
+                    status('notify', 'unavailable',
+                           'HTTP delivery needs urllib (disabled in light mode)',
+                           'run without --light, or set light_mode: false in the config')
+                else:
+                    status('notify', 'ok')
+            except (AttributeError, KeyError, TypeError):
+                pass  # a stub without the status map still applies webhooks
+
+        _take('notifications', valid_notifications, _notifications_apply,
+              'need webhooks list, cooldown 60-86400')
 
         def _refresh_ok(value):
             return isinstance(value, (int, float)) and 1 <= value <= 10
@@ -1277,6 +1383,16 @@ class SentinelMonitor:
         if not self.health_checks and not self.listeners:
             self._set_feature_status('health', 'unavailable', 'no health_checks or listeners configured',
                                      "set health_checks / listeners in config.json (see README)")
+        hooks = (self.notifications or {}).get('webhooks') or []
+        if not hooks:
+            self._set_feature_status('notify', 'unavailable', 'no webhooks configured',
+                                     'set notifications.webhooks in config.json (see README)')
+        elif self._light_mode:
+            self._set_feature_status('notify', 'unavailable',
+                                     'HTTP delivery needs urllib (disabled in light mode)',
+                                     'run without --light, or set light_mode: false in the config')
+        else:
+            self._set_feature_status('notify', 'ok')
 
     def _collect_probes(self):
         """Collector (30s): repeat cheap availability and permission probes.
@@ -2642,28 +2758,13 @@ class SentinelMonitor:
             except (TypeError, ValueError):
                 per_container[name] = {'state': 'down', 'detail': 'bad expect status'}
                 continue
-            if not isinstance(url, str) or not url.startswith(('http://', 'https://')):
-                per_container[name] = {'state': 'down', 'detail': 'bad url (need http:// or https://)'}
-                continue
-            # Guard the one dynamic URL in Sentinel. The config owner may
-            # point a check anywhere on their LAN or at localhost - that
-            # is the feature. The one range Sentinel refuses is
-            # link-local: a pasted cloud-metadata address must not turn
-            # the monitor into a proxy for instance credentials.
-            host = urllib.parse.urlsplit(url).hostname
-            if not host:
-                per_container[name] = {'state': 'down', 'detail': 'bad url (no host)'}
-                continue
-            try:
-                infos = socket.getaddrinfo(host, None)
-            except OSError:
-                per_container[name] = {'state': 'down',
-                                       'detail': f'cannot resolve {host[:40]}'}
-                continue
-            import ipaddress  # deferred: light mode keeps its small set
-            if any(ipaddress.ip_address(i[4][0]).is_link_local for i in infos):
-                per_container[name] = {'state': 'down',
-                                       'detail': 'blocked url (link-local host)'}
+            # Guard the one dynamic URL in this collector. The shared
+            # helper checks the scheme and the resolved host; a
+            # link-local address is refused, LAN and localhost stay
+            # allowed. The same guard covers the webhook notifier.
+            guard = _url_guard_detail(url)
+            if guard:
+                per_container[name] = {'state': 'down', 'detail': guard}
                 continue
             try:
                 opener = urllib.request.build_opener()
@@ -3750,6 +3851,10 @@ class SentinelMonitor:
 
         self.last_update = current_time
 
+        # Webhook notifications (v0.6.6): diff the fresh cache against
+        # the last alert pass. One dict compare per refresh.
+        self._check_alert_edges()
+
         if _PROFILE_PATH:
             try:
                 _prof_collectors = {}
@@ -3762,16 +3867,23 @@ class SentinelMonitor:
                         'subprocesses': _c.subprocess_count,
                         'error': str(_err) if _err else None,
                     }
-                with open(_PROFILE_PATH, 'a') as _f:
-                    _f.write(json.dumps({
-                        'ts': current_time,
-                        'stages': _prof_stages,
-                        'collectors': _prof_collectors,
-                        'total_ms': round((time.monotonic() - _prof_t0) * 1000, 3),
-                        'run_cmd_count': _RUN_CMD_COUNT,
-                        'frames_drawn': self.frames_drawn,
-                        'frames_skipped': self.frames_skipped,
-                    }) + '\n')
+                _line = json.dumps({
+                    'ts': current_time,
+                    'stages': _prof_stages,
+                    'collectors': _prof_collectors,
+                    'total_ms': round((time.monotonic() - _prof_t0) * 1000, 3),
+                    'run_cmd_count': _RUN_CMD_COUNT,
+                    'frames_drawn': self.frames_drawn,
+                    'frames_skipped': self.frames_skipped,
+                }) + '\n'
+                # SENTINEL_PROFILE names an operator-owned debug path.
+                # O_APPEND keeps each line one atomic write, even with
+                # two profiling Sentinels on one host.
+                _fd = os.open(_PROFILE_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+                try:
+                    os.write(_fd, _line.encode('utf-8'))
+                finally:
+                    os.close(_fd)
             except (OSError, TypeError, ValueError) as e:
                 # Profile output is a debug channel. It must never stop
                 # the monitor. But it must not hide real bugs.
@@ -3849,6 +3961,91 @@ class SentinelMonitor:
                 alerts.append((alert_type, alert['message'], alert['severity']))
 
         return alerts
+
+    def _check_alert_edges(self):
+        """Diff the active alerts against the last pass. A new alert, a
+        resolved alert, and a still-firing alert past its cooldown each
+        enqueue one webhook job. Runs once per data refresh, so the
+        steady-state cost is one dict compare.
+
+        One state per alert name: two containers down at once merge
+        into one notification. The cooldown reminder catches the one
+        that came second."""
+        hooks = (self.notifications or {}).get('webhooks') or []
+        if not hooks or self._light_mode or getattr(self, '_no_notify', False):
+            return
+        now = time.time()
+        cooldown = (self.notifications or {}).get('cooldown', 300)
+        active = set()
+        for name, value, severity in self.check_alerts(self.cache):
+            active.add(name)
+            state = self._alert_state.get(name)
+            if state is None:
+                self._alert_state[name] = {'last_sent': now}
+                self._enqueue_notify('fired', name, value)
+            elif now - state['last_sent'] >= cooldown:
+                state['last_sent'] = now
+                self._enqueue_notify('still', name, value)
+        for name in [n for n in self._alert_state if n not in active]:
+            del self._alert_state[name]
+            self._enqueue_notify('resolved', name, '')
+
+    def _notify_text(self, kind, name, value):
+        """One plain line per alert event. The webhook body carries it
+        under title/message/content/text, so Discord, Slack, and
+        Gotify-style endpoints all find their field."""
+        hostname = getattr(self, 'hostname', '') or 'host'
+        if kind == 'fired':
+            line = f'{name} fired: {value}' if value else f'{name} fired'
+        elif kind == 'still':
+            line = f'{name} still firing: {value}' if value else f'{name} still firing'
+        else:
+            line = f'{name} resolved'
+        return f'[Sentinel {hostname}] {line}'
+
+    def _enqueue_notify(self, kind, name, value):
+        """Queue one alert event for the webhook worker."""
+        self._ensure_notify_worker()
+        self._notify_queue.put((kind, name, value))
+
+    def _ensure_notify_worker(self):
+        """Start the worker thread on the first job, never before."""
+        if self._notify_worker_started:
+            return
+        self._notify_worker_started = True
+        threading.Thread(target=self._notify_worker,
+                         name='sentinel-notify', daemon=True).start()
+
+    def _notify_worker(self):
+        """One background thread: POST alert events to the configured
+        webhooks. urllib loads here only, so a config with no webhooks
+        never pays its RSS (~2MB)."""
+        import urllib.request  # deferred; see _collect_public_ip
+        while not self._collector_stop.is_set():
+            try:
+                job = self._notify_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            kind, name, value = job
+            text = self._notify_text(kind, name, value)
+            payload = {'title': f'Sentinel {getattr(self, "hostname", "")}'.strip(),
+                       'message': text, 'content': text, 'text': text}
+            sent, detail = 0, 'all webhook deliveries failed'
+            for url in list((self.notifications or {}).get('webhooks') or []):
+                guard = _url_guard_detail(url)
+                if guard:
+                    detail = guard
+                    continue
+                ok, err = _webhook_post(urllib.request, url, payload)
+                if ok:
+                    sent += 1
+                else:
+                    detail = err
+            if sent:
+                self._set_feature_status('notify', 'ok')
+            else:
+                self._set_feature_status('notify', 'error',
+                                         f'delivery failed: {detail}'[:90])
 
     def setup_colors(self):
         """Set color pairs from the theme."""
@@ -4956,6 +5153,9 @@ def dump_snapshot(config):
     run each fleet refresh.
     """
     monitor = SentinelMonitor(config=config, service_mode=True)
+    # A fleet probe never sends notifications. Service mode (also
+    # service_mode=True) keeps them: only the dump path opts out.
+    monitor._no_notify = True
     try:
         # Only the smallest sync readers run here (cpu, mem, uptime).
         # The rest (disk statvfs, network sysfs, collectors) is optional
@@ -5454,6 +5654,7 @@ Examples:
   sentinel --init-config      # Create the default configuration file
   sentinel --dump             # Print one JSON status line (fleet probe)
   sentinel --host hosts.json  # Show the fleet view of many hosts through SSH
+  sentinel --test-notify      # Send one test message to the webhooks and exit
 
 Fleet hosts file (--host): {"nodes": [{"name": "pi4", "host": "192.168.1.10",
   "user": "pi", "port": 22, "key": "~/.ssh/id_rsa"}]}. Each node needs this
@@ -5487,6 +5688,9 @@ Configuration file paths (first match wins):
     parser.add_argument('--host', type=str, metavar='HOSTS_FILE',
                         help='Show the fleet view of many hosts through SSH '
                              '(JSON file with {"nodes": [{"name", "host", "user", "port", "key"}]})')
+    parser.add_argument('--test-notify', action='store_true',
+                        help='Send one test message to the configured '
+                             'notification webhooks and exit')
     parser.add_argument('--sentinel-path', type=str,
                         default='sentinel-monitor.py',
                         help='Remote path of sentinel-monitor.py on fleet '
@@ -5536,6 +5740,30 @@ Configuration file paths (first match wins):
         config['light_mode'] = True
         config['_cli_keys'].append('light_mode')
 
+    # Send one test webhook message and exit. The branch sits before
+    # the panel paths, so it works on a host with no curses at all.
+    if args.test_notify:
+        hooks = (config.get('notifications') or {}).get('webhooks') or []
+        if not hooks:
+            print('No webhooks configured. Set notifications.webhooks in config.json.')
+            return 1
+        import urllib.request  # deferred; see _collect_public_ip
+        hostname = socket.gethostname()
+        text = 'Sentinel test notification: the webhook path works.'
+        payload = {'title': f'Sentinel test ({hostname})',
+                   'message': text, 'content': text, 'text': text}
+        failed = 0
+        for url in hooks:
+            guard = _url_guard_detail(url)
+            if guard:
+                print(f'FAIL {url} -> {guard}')
+                failed += 1
+                continue
+            ok, detail = _webhook_post(urllib.request, url, payload)
+            print(('OK  ' if ok else 'FAIL') + f' {url}' + ('' if ok else f' -> {detail}'))
+            failed += 0 if ok else 1
+        return 1 if failed else 0
+
     # Pick the run mode (--dump and --host first: fleet calls must work
     # even where curses is missing or /proc is absent, as on probe targets)
     if args.dump:
@@ -5561,4 +5789,4 @@ Configuration file paths (first match wins):
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
