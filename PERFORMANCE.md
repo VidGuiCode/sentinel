@@ -501,4 +501,3 @@ htop sets the low mark for cost, and it monitors far less:
   Past that, only a compiled rewrite shifts it. The evidence does not back
   it now - see [Should this be rewritten?](#should-this-be-rewritten).
 - Take true ARM performance values on real hardware. QEMU proves that code runs; it cannot test speed.
-- Put per-panel intervals in the configuration file, so users can trade freshness for CPU per feature, not just for the whole tool.

@@ -89,7 +89,7 @@ from datetime import datetime, timedelta
 from collections import deque
 from pathlib import Path
 
-VERSION = "0.6.4"
+VERSION = "0.6.5"
 
 # Profile record (active only when SENTINEL_PROFILE holds a path)
 _PROFILE_PATH = os.environ.get('SENTINEL_PROFILE')
@@ -119,6 +119,11 @@ DEFAULT_CONFIG = {
     'theme': 'default',
     'layout': 'default',
     'refresh_rate': 2,
+    # Per-panel cadence (v0.6.5): one refresh interval per collector,
+    # in seconds. An empty map keeps the code defaults. Names must be
+    # known collectors (COLLECTOR_NAMES); values are seconds 1-604800.
+    # A set value wins over the light-mode derivation.
+    'intervals': {},
     'alerts': {
         'cpu_high': 85,
         'cpu_critical': 95,
@@ -160,6 +165,33 @@ DEFAULT_CONFIG = {
         # 22, 80, 443,
     ],
 }
+
+# Collector names a user may retune in config (`intervals`). Keep in
+# sync with the registration block in SentinelMonitor.__init__.
+COLLECTOR_NAMES = frozenset({
+    'docker', 'docker_df', 'kubernetes', 'wireguard', 'proxy',
+    'security', 'processes', 'public_ip', 'update_check', 'probes',
+    'ssid', 'health',
+})
+
+
+def valid_intervals(value):
+    """True when `intervals` is a clean {collector_name: seconds} map.
+
+    One bad name or value fails the whole key, same policy as the
+    other config keys: the old live value stays and the note says why.
+    The ceiling is a week, so a light-mode `update_check: 604800`
+    stays legal."""
+    if not isinstance(value, dict):
+        return False
+    for name, seconds in value.items():
+        if name not in COLLECTOR_NAMES:
+            return False
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+            return False
+        if not 1 <= seconds <= 604800:
+            return False
+    return True
 
 # Color themes
 def _curses_color(name, fallback):
@@ -1026,6 +1058,12 @@ class SentinelMonitor:
                 'HTTP checks need urllib (disabled in light mode)',
                 'run without --light, or set light_mode: false in the config')
         self._register_collector('health', 30, self._collect_health)
+        # Per-panel cadence (v0.6.5): config overrides land before the
+        # threads start, so the first wait already uses the user value.
+        intervals = self.config.get('intervals')
+        if valid_intervals(intervals):
+            for name, seconds in intervals.items():
+                self.collectors[name].interval = seconds
         for collector in self.collectors.values():
             collector.start()
 
@@ -1042,8 +1080,8 @@ class SentinelMonitor:
 
         Safe keys update at once: theme, layout, refresh_rate, alerts,
         health_checks, listeners, proxy_logs, security_logs,
-        security_alerts, show_per_core, show_vpn, public_ip_check.
-        They touch reads only; no thread restarts.
+        security_alerts, show_per_core, show_vpn, public_ip_check,
+        intervals. They touch reads only; no thread restarts.
 
         Held keys stay for the next start: light_mode (it sizes
         history and starts collectors) and log_file. CLI keys also
@@ -1101,6 +1139,18 @@ class SentinelMonitor:
         _take('public_ip_check', lambda v: isinstance(v, bool),
               lambda v: setattr(self, 'public_ip_check', v))
 
+        def _intervals_apply(value):
+            # Live per-panel cadence (v0.6.5). Collector._loop re-reads
+            # `interval` each cycle, so no thread restart is needed.
+            # A name absent from the new map falls back to the code
+            # default, so removing one entry (or the whole key)
+            # restores stock cadence at once.
+            for name, collector in getattr(self, 'collectors', {}).items():
+                collector.interval = value.get(name, collector.base_interval)
+
+        _take('intervals', valid_intervals, _intervals_apply,
+              'need known panel, seconds 1-604800')
+
         def _refresh_ok(value):
             return isinstance(value, (int, float)) and 1 <= value <= 10
 
@@ -1156,7 +1206,12 @@ class SentinelMonitor:
         return note
 
     def _register_collector(self, name, interval, fn):
-        self.collectors[name] = Collector(name, interval, fn, self._collector_stop)
+        collector = Collector(name, interval, fn, self._collector_stop)
+        # Code default for this host (light mode shifts some). The
+        # `intervals` config key overrides; removing the key or one
+        # entry restores this value at once.
+        collector.base_interval = interval
+        self.collectors[name] = collector
 
     def _collector_result(self, name):
         """Return the latest published collector result. Return None when it never ran."""
@@ -4981,6 +5036,10 @@ def dump_snapshot(config):
             'health_healthy': health.get('healthy', 0),
             'health_down': health.get('down', 0),
             'health_listeners': health.get('listeners', {}),
+            # Per-panel cadence (v0.6.5): effective seconds per
+            # collector, so a host reports how fresh its own panels are.
+            'intervals': {name: c.interval
+                          for name, c in monitor.collectors.items()},
         }
         print(json.dumps(snapshot))
     finally:

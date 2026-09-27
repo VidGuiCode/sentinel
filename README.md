@@ -8,7 +8,7 @@ hosts with small CPUs and small memory.
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.6+-green.svg)
 ![Platform](https://img.shields.io/badge/platform-linux-lightgrey.svg)
-![Version](https://img.shields.io/badge/version-0.6.4-cyan.svg)
+![Version](https://img.shields.io/badge/version-0.6.5-cyan.svg)
 
 ```
 +------------------ CPU (12 cores, 15.5%) ------------------+------------------ MEM (22.2%) ------------------+------ NET (eth0, 10Gbps) ------+
@@ -285,6 +285,35 @@ No restart serves for safe keys (theme, limits, checks).
 }
 ```
 
+`intervals` sets a refresh interval per panel. It maps a collector
+name to seconds.
+
+```json
+{
+  "intervals": {
+    "docker": 10,
+    "security": 2
+  }
+}
+```
+
+The known names and built-in defaults, in seconds, are: `docker` 5,
+`docker_df` 30, `kubernetes` 15, `wireguard` 10, `proxy` 5 (10 in
+light mode), `security` 5, `processes` 5, `public_ip` 300,
+`update_check` 86400 (604800 in light mode), `probes` 30, `ssid` 60,
+and `health` 30. The default `{}` keeps these defaults.
+
+- Edits act at once: each collector re-reads its interval every
+  cycle, no restart.
+- A removed entry restores that panel's default. An emptied key
+  restores every default.
+- An explicit value wins over the light-mode derivation.
+- The range is 1 to 604800 seconds.
+- A bad value (unknown name, out of range, wrong type) rejects the
+  whole key: the old cadence stays, and the footer notes the cause.
+- `sentinel --dump` includes the effective `intervals` map, so a
+  host reports how fresh its own panels are.
+
 ## Needs
 
 - Python 3.6+ with only the standard library. Zero pip packages.
@@ -323,6 +352,8 @@ Full facts in [PERFORMANCE.md](PERFORMANCE.md).
 
 Full facts for each change stay in [CHANGELOG.md](CHANGELOG.md).
 
+- **v0.6.5** - Per-panel refresh intervals: a new `intervals` key
+  maps each panel to seconds. Edits apply live, no restart.
 - **v0.6.4** - Config hot-reload: file edits act at once, no restart.
   Safe keys (theme, limits, checks) apply live. Held keys
   (`light_mode`, CLI flags) wait for restart and state it.

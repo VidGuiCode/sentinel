@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.6.5 - per-panel refresh intervals
+
+`config.json` takes a new `intervals` key.
+`intervals` maps a collector name to a refresh interval in seconds.
+The range is 1 to 604800 seconds.
+The default `{}` keeps built-in defaults.
+The known names and built-in defaults, in seconds, are:
+docker 5, docker_df 30, kubernetes 15, wireguard 10,
+proxy 5 (10 in light mode), security 5, processes 5,
+public_ip 300, update_check 86400 (604800 in light mode),
+probes 30, ssid 60, health 30.
+
+`intervals` joins the safe keys for hot-reload.
+An edit applies the new cadence live, with no restart.
+Each collector re-reads its interval every cycle.
+A removed entry restores that panel's built-in default at once.
+An emptied key restores every built-in default at once.
+An explicit value wins over the light-mode derivation.
+A bad value rejects the whole key.
+Bad means an unknown name, an out-of-range number, or a wrong type.
+The old cadence stays.
+The footer notes the cause:
+`bad intervals value kept (need known panel, seconds 1-604800)`.
+The note reaches the diagnostics overlay (`d`).
+
+`sentinel --dump` adds an `intervals` map.
+The map holds the effective seconds per collector.
+So a host reports how fresh its own panels are.
+
+`tests/test-intervals.py` holds 33 checks.
+All checks use stubs or temp files.
+No check starts a collector.
+No check starts a child process.
+
 ## v0.6.4 - config hot-reload
 
 Edits to `config.json` act at once.
