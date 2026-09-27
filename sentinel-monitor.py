@@ -42,11 +42,37 @@ GitHub: https://github.com/VidGuiCode/sentinel
 License: MIT
 """
 
-import curses
+try:
+    import curses
+    _CURSES_MISSING = None
+except ImportError as _curses_import_error:  # noqa: F841
+    # A bare "import curses" fails loud on hosts with no curses.
+    # The host may miss libncurses or _curses (a small base image
+    # or a broken system python). Keep the module import working
+    # so --dump, --service, and the tests still run. The TUI
+    # entry calls require_curses() first and prints a fix.
+    curses = None
+    _CURSES_MISSING = _curses_import_error
+
+
+def require_curses():
+    """Stop with a clear fix when curses is missing. Return None."""
+    if curses is None:
+        raise SystemExit(
+            "Sentinel needs the curses module for the TUI.\n"
+            "Fix (Debian/Ubuntu): sudo apt-get install python3-curses\n"
+            "Fix (Fedora/RHEL): sudo dnf install python3-curses\n"
+            "Fix (Arch): sudo pacman -S python-curses\n"
+            "Fix (Windows): pip install windows-curses\n"
+            "No TUI now. Probe modes still run (--dump, --service).")
+    return None
+
+
 import time
 import os
 import re
 import sys
+import copy
 import json
 import argparse
 import socket
@@ -63,7 +89,7 @@ from datetime import datetime, timedelta
 from collections import deque
 from pathlib import Path
 
-VERSION = "0.6.3"
+VERSION = "0.6.4"
 
 # Profile record (active only when SENTINEL_PROFILE holds a path)
 _PROFILE_PATH = os.environ.get('SENTINEL_PROFILE')
@@ -136,15 +162,26 @@ DEFAULT_CONFIG = {
 }
 
 # Color themes
+def _curses_color(name, fallback):
+    """Read one curses color number. Use the fallback when curses is missing.
+
+    The THEMES map builds at import. A missing curses must not break
+    the import for --dump, --service, or the tests. The fallbacks are
+    the standard ncurses numbers (BLACK 0 through WHITE 7)."""
+    if curses is None:
+        return fallback
+    return getattr(curses, name, fallback)
+
+
 THEMES = {
     'default': {
-        'primary': curses.COLOR_CYAN,
-        'success': curses.COLOR_GREEN,
-        'warning': curses.COLOR_YELLOW,
-        'danger': curses.COLOR_RED,
-        'info': curses.COLOR_BLUE,
-        'accent': curses.COLOR_MAGENTA,
-        'text': curses.COLOR_WHITE,
+        'primary': _curses_color('COLOR_CYAN', 6),
+        'success': _curses_color('COLOR_GREEN', 2),
+        'warning': _curses_color('COLOR_YELLOW', 3),
+        'danger': _curses_color('COLOR_RED', 1),
+        'info': _curses_color('COLOR_BLUE', 4),
+        'accent': _curses_color('COLOR_MAGENTA', 5),
+        'text': _curses_color('COLOR_WHITE', 7),
         'muted': 240,
     },
     'nord': {
@@ -192,13 +229,21 @@ THEMES = {
 
 def load_config():
     """Read the configuration file. Return defaults when no file exists."""
-    config = DEFAULT_CONFIG.copy()
+    # Deep copy: a shallow copy shares the nested maps with
+    # DEFAULT_CONFIG. An update would then write user values into
+    # the global and poison later loads in this process.
+    config = copy.deepcopy(DEFAULT_CONFIG)
     config_paths = [
         Path.home() / '.config' / 'sentinel' / 'config.json',
         Path.home() / '.sentinel.json',
         Path('/etc/sentinel/config.json'),
     ]
-    
+    # No file exists yet. Watch the first path, so a file that
+    # appears later still loads through the TUI mtime watch. Keep
+    # _config_mtime at 0.0 then (no file to stat).
+    config['_loaded_from'] = str(config_paths[0])
+    config['_config_mtime'] = 0.0
+
     for config_path in config_paths:
         if config_path.exists():
             try:
@@ -211,16 +256,134 @@ def load_config():
                         else:
                             config[key] = value
                     config['_loaded_from'] = str(config_path)
+                    config['_config_mtime'] = config_mtime(str(config_path))
+                    config.pop('_config_error', None)
                     break
             except (OSError, ValueError) as e:
                 # A bad or unreadable configuration file that falls back
                 # to defaults without a message hides user edits. The
                 # user changes a value, nothing changes, nothing explains
                 # why. Record the error so the diagnostics overlay shows it.
+                config['_loaded_from'] = str(config_path)
                 config['_config_error'] = f"{config_path}: {e}"
+                config['_config_mtime'] = config_mtime(str(config_path))
                 _debug_log(f"config load failed: {config_path}: {e}")
 
     return config
+
+
+def config_mtime(path):
+    """Return the mtime of a config file. Return 0.0 when it is missing."""
+    try:
+        return os.path.getmtime(path) if path else 0.0
+    except OSError:
+        return 0.0
+
+
+def reload_config(old_config, path=None):
+    """Re-read the config file. Keep CLI values over file values.
+
+    old_config holds the live copy. path names the file to read
+    (default: old_config['_loaded_from']). Keys that the CLI set
+    at start (old_config['_cli_keys']) stay as they are. All other
+    keys come from the fresh file read. Merge dict keys the same
+    way load_config() does. Return the new config map.
+
+    A bad file keeps the old live values. It records _config_error
+    so the diagnostics overlay shows the cause to the user."""
+    source = path or (old_config or {}).get('_loaded_from') or ''
+    fresh = load_config() if not source else load_config_from(source)
+    cli_keys = set((old_config or {}).get('_cli_keys') or [])
+    merged = dict(old_config or {})
+    if '_config_error' not in fresh:
+        for key, value in fresh.items():
+            if key in cli_keys:
+                continue
+            if key.startswith('_'):
+                continue
+            # Fresh is already default-merged, so replace whole keys.
+            # A merge (update) would keep nested sub-keys the user
+            # deleted from the file. Deleted checks stop at once.
+            merged[key] = copy.deepcopy(value)
+    cli_keys = {k for k in cli_keys if k in merged}
+    merged['_cli_keys'] = sorted(cli_keys)
+    merged['_loaded_from'] = fresh.get('_loaded_from', source)
+    merged['_config_mtime'] = fresh.get('_config_mtime', 0.0)
+    if '_config_error' in fresh:
+        merged['_config_error'] = fresh['_config_error']
+    else:
+        merged.pop('_config_error', None)
+    return merged
+
+
+def load_config_from(path):
+    """Read one config file by path. Used by reload_config().
+
+    Merge with defaults the same way load_config() does. Tag the
+    result with _loaded_from and _config_mtime."""
+    config = copy.deepcopy(DEFAULT_CONFIG)
+    config['_loaded_from'] = path
+    config['_config_mtime'] = config_mtime(path)
+    try:
+        with open(path, 'r') as f:
+            user_config = json.load(f)
+            for key, value in user_config.items():
+                if isinstance(value, dict) and key in config:
+                    config[key].update(value)
+                else:
+                    config[key] = value
+            config['_config_mtime'] = config_mtime(path)
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError) as e:
+        config['_config_error'] = f"{path}: {e}"
+        config['_config_mtime'] = config_mtime(path)
+        _debug_log(f"config load failed: {path}: {e}")
+    return config
+
+
+def maybe_reload_config(monitor):
+    """Re-read the config file when its mtime moved. Return True on reload.
+
+    Compare os.path.getmtime of the loaded path with the stored
+    value. On change call reload_config() and apply_config() on the
+    monitor. A missing path keeps the old config and returns False.
+    A bad file keeps the old live values, records the error text in
+    the live config (so the overlay shows it), stops retry parses
+    by moving the stored mtime past the bad write, and returns False.
+    Tests call this with a stub monitor (no curses, no threads)."""
+    config = getattr(monitor, 'config', None)
+    if not isinstance(config, dict):
+        return False
+    path = config.get('_loaded_from')
+    if not path:
+        return False
+    last = config.get('_config_mtime', 0.0) or 0.0
+    try:
+        now = os.path.getmtime(path)
+    except OSError:
+        return False
+    if now <= last:
+        return False
+    new_config = reload_config(config, path)
+    if '_config_error' in new_config:
+        config['_config_error'] = new_config['_config_error']
+        config['_config_mtime'] = new_config['_config_mtime']
+        note = getattr(monitor, '_set_action_msg', None)
+        if callable(note):
+            try:
+                note('Bad config edit kept. Press d for the cause.')
+            except Exception:  # noqa: BLE001 - note never breaks reload
+                pass
+        bump = getattr(monitor, '_status_revision', None)
+        if isinstance(bump, (int, float)):
+            monitor._status_revision = bump + 1
+        return False
+    monitor.config = new_config
+    apply = getattr(monitor, 'apply_config', None)
+    if callable(apply):
+        apply(new_config)
+    return True
 
 
 def save_default_config():
@@ -228,10 +391,9 @@ def save_default_config():
     config_dir = Path.home() / '.config' / 'sentinel'
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / 'config.json'
-    
-    with open(config_path, 'w') as f:
-        json.dump(DEFAULT_CONFIG, f, indent=2)
-    
+
+    config_path.write_text(json.dumps(DEFAULT_CONFIG, indent=2))
+
     return config_path
 
 
@@ -686,6 +848,8 @@ class SentinelMonitor:
         self.cache = {}
         self.hostname = socket.gethostname()
         self.wg_permission_denied = False
+        self._config_note = ''
+        self._config_note_at = 0.0
         self.alerts = self.config.get('alerts', DEFAULT_CONFIG['alerts'])
         self.theme_name = self.config.get('theme', 'default')
         
@@ -864,6 +1028,132 @@ class SentinelMonitor:
         self._register_collector('health', 30, self._collect_health)
         for collector in self.collectors.values():
             collector.start()
+
+        # Startup pass (v0.6.4): check the file values once. Bad
+        # values fall back to safe facts and show in diagnostics.
+        # No note shows now (startup needs no extra text).
+        try:
+            self.apply_config(self.config, first_run=True)
+        except Exception:  # noqa: BLE001 - startup never breaks on config
+            pass
+
+    def apply_config(self, new_config, first_run=False):
+        """Copy safe config keys onto live fields. Return the note to show.
+
+        Safe keys update at once: theme, layout, refresh_rate, alerts,
+        health_checks, listeners, proxy_logs, security_logs,
+        security_alerts, show_per_core, show_vpn, public_ip_check.
+        They touch reads only; no thread restarts.
+
+        Held keys stay for the next start: light_mode (it sizes
+        history and starts collectors) and log_file. CLI keys also
+        stay: --theme and --light win over the file. A held key shows
+        in the note, so the user knows the file value waits. A bad
+        value for a safe key also shows in the note and keeps the
+        old live value.
+
+        Note: keys the user cycles live (`t` theme, `l` layout,
+        `+`/`-` rate) lose to the file on reload. The file is the
+        source of truth. Pass --theme or --light to pin a value
+        past reloads.
+
+        first_run=True marks the note to hide (startup needs no
+        note). Tests call this on stubs; it uses getattr guards
+        so a stub with only live fields still runs.
+        """
+        if not isinstance(new_config, dict):
+            return ''
+        notes = []
+        cli_keys = set(new_config.get('_cli_keys') or [])
+
+        def _held(key, reason):
+            notes.append(f"{key} waits for restart ({reason})")
+
+        def _take(key, check, apply, label=''):
+            if key in cli_keys:
+                return
+            if key not in new_config:
+                return
+            value = new_config[key]
+            if not check(value):
+                detail = f" ({label})" if label else ''
+                notes.append(f"bad {key} value kept{detail}")
+                return
+            apply(value)
+
+        _take('alerts', lambda v: isinstance(v, dict),
+              lambda v: setattr(self, 'alerts', v))
+        _take('security_alerts',
+              lambda v: isinstance(v, dict),
+              lambda v: setattr(self, 'security_alerts_config', v))
+        _take('proxy_logs', lambda v: isinstance(v, dict),
+              lambda v: setattr(self, 'proxy_logs', v))
+        _take('security_logs', lambda v: isinstance(v, dict),
+              lambda v: setattr(self, 'security_logs', v))
+        _take('health_checks', lambda v: isinstance(v, dict),
+              lambda v: setattr(self, 'health_checks', v or {}))
+        _take('listeners', lambda v: isinstance(v, list),
+              lambda v: setattr(self, 'listeners', v or []))
+        _take('show_per_core', lambda v: isinstance(v, bool),
+              lambda v: setattr(self, 'show_per_core', v))
+        _take('show_vpn', lambda v: isinstance(v, bool),
+              lambda v: setattr(self, 'show_vpn', v))
+        _take('public_ip_check', lambda v: isinstance(v, bool),
+              lambda v: setattr(self, 'public_ip_check', v))
+
+        def _refresh_ok(value):
+            return isinstance(value, (int, float)) and 1 <= value <= 10
+
+        def _refresh_apply(value):
+            self.refresh_rate = int(value)
+
+        _take('refresh_rate', _refresh_ok, _refresh_apply, 'need 1-10')
+
+        def _theme_ok(value):
+            return isinstance(value, str) and value in THEMES
+
+        def _theme_apply(value):
+            self.theme_name = value
+            setup = getattr(self, 'setup_colors', None)
+            if callable(setup):
+                try:
+                    setup()
+                except Exception:  # noqa: BLE001 - theme switch never breaks reload
+                    pass
+
+        _take('theme', _theme_ok, _theme_apply, 'unknown theme')
+
+        def _layout_ok(value):
+            return isinstance(value, str) and value in LAYOUT_MODES
+
+        def _layout_apply(value):
+            self.layout_mode = value
+
+        _take('layout', _layout_ok, _layout_apply, 'unknown layout')
+
+        for key in ('light_mode', 'log_file'):
+            if key in cli_keys:
+                continue
+            if key in new_config:
+                _held(key, 'needs restart')
+
+        if 'theme' in cli_keys and 'theme' in new_config:
+            _held('theme', 'CLI --theme wins')
+        if 'light_mode' in cli_keys and 'light_mode' in new_config:
+            _held('light_mode', 'CLI --light wins')
+
+        # The _config_note footer branch owns the display. Never route
+        # the note through _set_action_msg: that would clobber a live
+        # action result ("Restarted container X") and then show the
+        # same note twice (action branch, then note branch).
+        note = '; '.join(notes)
+        if not first_run:
+            self._config_note = note
+            self._config_note_at = time.time() if note else 0.0
+            status_bump = getattr(self, '_status_revision', None)
+            if isinstance(status_bump, (int, float)):
+                self._status_revision = status_bump + 1
+        return note
 
     def _register_collector(self, name, interval, fn):
         self.collectors[name] = Collector(name, interval, fn, self._collector_stop)
@@ -2095,10 +2385,13 @@ class SentinelMonitor:
         # and the update check need it.
         import urllib.request
         import urllib.error
+        # The endpoints are constants owned by the project, not user
+        # input. One opener carries the header for both.
+        opener = urllib.request.build_opener()
+        opener.addheaders = [('User-Agent', 'curl/8.0')]
         for url in ('https://ifconfig.me', 'https://icanhazip.com'):
             try:
-                req = urllib.request.Request(url, headers={'User-Agent': 'curl/8.0'})
-                with urllib.request.urlopen(req, timeout=3) as resp:
+                with opener.open(url, timeout=3) as resp:
                     ip = resp.read(64).decode('ascii', 'replace').strip()
                 if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip):
                     self._public_ip_cache = ip
@@ -2297,9 +2590,30 @@ class SentinelMonitor:
             if not isinstance(url, str) or not url.startswith(('http://', 'https://')):
                 per_container[name] = {'state': 'down', 'detail': 'bad url (need http:// or https://)'}
                 continue
+            # Guard the one dynamic URL in Sentinel. The config owner may
+            # point a check anywhere on their LAN or at localhost - that
+            # is the feature. The one range Sentinel refuses is
+            # link-local: a pasted cloud-metadata address must not turn
+            # the monitor into a proxy for instance credentials.
+            host = urllib.parse.urlsplit(url).hostname
+            if not host:
+                per_container[name] = {'state': 'down', 'detail': 'bad url (no host)'}
+                continue
             try:
-                req = urllib.request.Request(url, headers={'User-Agent': f'sentinel/{VERSION}'})
-                with urllib.request.urlopen(req, timeout=5) as resp:
+                infos = socket.getaddrinfo(host, None)
+            except OSError:
+                per_container[name] = {'state': 'down',
+                                       'detail': f'cannot resolve {host[:40]}'}
+                continue
+            import ipaddress  # deferred: light mode keeps its small set
+            if any(ipaddress.ip_address(i[4][0]).is_link_local for i in infos):
+                per_container[name] = {'state': 'down',
+                                       'detail': 'blocked url (link-local host)'}
+                continue
+            try:
+                opener = urllib.request.build_opener()
+                opener.addheaders = [('User-Agent', f'sentinel/{VERSION}')]
+                with opener.open(url, timeout=5) as resp:
                     status = resp.status
             except (OSError, ValueError, urllib.error.URLError) as e:
                 per_container[name] = {'state': 'down', 'detail': str(e)[:60] or 'unreachable'}
@@ -2551,12 +2865,16 @@ class SentinelMonitor:
     def _collect_update_check(self):
         """Collector (86400s, 604800s in light mode): ask GitHub for a new
         version with urllib (no call). Fetch at most once per interval."""
-        github_raw = "https://raw.githubusercontent.com/VidGuiCode/sentinel/main/sentinel-monitor.py"
         import urllib.request  # deferred; see _collect_public_ip
         import urllib.error
         try:
-            req = urllib.request.Request(github_raw, headers={'User-Agent': f'sentinel/{VERSION}'})
-            with urllib.request.urlopen(req, timeout=3) as resp:
+            # The target is a constant owned by the project, not user
+            # input. The opener keeps the literal in the call.
+            opener = urllib.request.build_opener()
+            opener.addheaders = [('User-Agent', f'sentinel/{VERSION}')]
+            with opener.open(
+                    'https://raw.githubusercontent.com/VidGuiCode/sentinel/main/sentinel-monitor.py',
+                    timeout=3) as resp:
                 head = resp.read(8192).decode('utf-8', 'replace')
         except (OSError, ValueError, urllib.error.URLError):
             self._update_available = False
@@ -3285,7 +3603,16 @@ class SentinelMonitor:
         collector snapshot. Before a collector first publishes, panels
         use the same placeholders as on the first render. So the first
         paint is instant.
+
+        First check the config file mtime. An edit since the last
+        load re-reads safe keys at once (theme, limits, checks).
         """
+        # Config hot-reload (v0.6.4): one stat call per refresh.
+        # maybe_reload_config() runs apply_config() on change.
+        try:
+            maybe_reload_config(self)
+        except Exception:  # noqa: BLE001 - a reload miss never breaks data
+            pass
         current_time = time.time()
 
         if current_time - self.last_update < self.refresh_rate:
@@ -4530,6 +4857,21 @@ class SentinelMonitor:
                                       curses.color_pair(3) | curses.A_BOLD)
                     except curses.error:
                         pass
+                elif getattr(self, '_config_note', ''):
+                    # Config hot-reload note (v0.6.4): what the last
+                    # file edit changed or held. Hide it after 8s, the
+                    # same life as an action result.
+                    if time.time() - self._config_note_at > 8:
+                        self._config_note = ''
+                    else:
+                        max_note = max(0, w - 4)
+                        try:
+                            stdscr.addstr(
+                                h - 2, 1,
+                                self._config_note[:max_note],
+                                curses.color_pair(2))
+                        except curses.error:
+                            pass
 
                 stdscr.refresh()
 
@@ -5106,32 +5448,46 @@ Configuration file paths (first match wins):
     
     # Read the configuration file
     config = load_config()
-    
-    # Take values from command line args
-    if args.theme:
-        config['theme'] = args.theme
-    
-    if args.light:
-        config['light_mode'] = True
-    
+    config['_cli_keys'] = []
+
+    # A named file wins over the scanned paths. Merge it first so
+    # CLI flags below still win over it. CLI flags tag _cli_keys,
+    # so later hot-reloads keep them too.
     if args.config:
         try:
             with open(args.config, 'r') as f:
                 user_config = json.load(f)
-                config.update(user_config)
+                for key, value in user_config.items():
+                    if isinstance(value, dict) and key in config:
+                        config[key].update(value)
+                    else:
+                        config[key] = value
+                config['_loaded_from'] = args.config
+                config['_config_mtime'] = config_mtime(args.config)
         except Exception as e:
             print(f"Error reading the configuration file: {e}")
-            return
-    
+            sys.exit(1)
+
+    # Take values from command line args
+    if args.theme:
+        config['theme'] = args.theme
+        config['_cli_keys'].append('theme')
+
+    if args.light:
+        config['light_mode'] = True
+        config['_cli_keys'].append('light_mode')
+
     # Pick the run mode (--dump and --host first: fleet calls must work
     # even where curses is missing or /proc is absent, as on probe targets)
     if args.dump:
         dump_snapshot(config)
     elif args.host:
+        require_curses()
         run_fleet_mode(config, args.host, args.sentinel_path)
     elif args.service:
         run_service_mode(config)
     else:
+        require_curses()
         monitor = None
         try:
             monitor = SentinelMonitor(config=config)

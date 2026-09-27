@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.6.4 - config hot-reload
+
+Edits to `config.json` act at once.
+Sentinel reads the file mtime on each refresh.
+No restart serves for safe keys.
+Safe keys are theme, layout, refresh rate, alerts, health checks,
+listeners, proxy logs, security logs, and security alerts.
+Held keys wait for restart and state it.
+Held keys are `light_mode`, `log_file`, and CLI flags
+(`--theme`, `--light`).
+A bad edit keeps old facts and notes the cause in the footer.
+The error text reaches the diagnostics overlay (`d`).
+A removed check stops at once (no stale keys linger).
+
+A lost `curses` module now prints a fix, not a traceback.
+The fix names the package per host
+(`python3-curses`, `python-curses`, `windows-curses`).
+Probe modes (`--dump`, `--service`) still run with no curses.
+
+The HTTP paths harden their edges.
+A health check now resolves its host first and refuses a link-local
+target, so a pasted cloud-metadata address cannot turn the monitor
+into a proxy for instance credentials.
+Plain LAN and localhost checks stay allowed.
+The config writer and the bench tools write through pathlib.
+
+`tests/test-reload.py` holds 58 checks.
+All checks use stubs or temp files.
+No check starts a collector.
+No check starts a child process.
+
 ## v0.6.3 - quick actions
 
 Sentinel is now a tool, not just a panel.

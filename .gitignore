@@ -49,3 +49,10 @@ htmlcov/
 *.deb
 *.rpm
 context/
+
+# Local plugin state (security scanner, video tools)
+.mimosa/
+.video_agent/
+
+# Test temp dirs
+tests/.tmp-*/

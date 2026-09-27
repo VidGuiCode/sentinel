@@ -24,6 +24,7 @@ import argparse
 import errno
 import fcntl
 import os
+import pathlib
 import re
 import select
 import signal
@@ -240,8 +241,7 @@ def main():
 
     out = screen.text()
     if args.out:
-        with open(args.out, 'w', encoding='utf-8') as f:
-            f.write(out + '\n')
+        pathlib.Path(args.out).write_text(out + '\n', encoding='utf-8')
     sys.stdout.write(out + '\n')
     # A frame with almost no shapes means the tool never drew.
     non_blank = sum(1 for line in out.splitlines() if line.strip())

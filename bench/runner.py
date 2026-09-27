@@ -22,6 +22,7 @@ import argparse
 import fcntl
 import json
 import os
+import pathlib
 import select
 import signal
 import struct
@@ -309,8 +310,7 @@ def main():
         'raw_samples': kept,
     }
 
-    with open(ns.out, 'w') as f:
-        json.dump(result, f, indent=2)
+    pathlib.Path(ns.out).write_text(json.dumps(result, indent=2))
     print(f"[runner] {ns.name}: {len(kept)} samples -> {ns.out} "
           f"(exit={proc.returncode}, cpu_mean={result['cpu_percent']['mean']}%)")
 
